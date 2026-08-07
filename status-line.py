@@ -100,12 +100,21 @@ except (json.JSONDecodeError, TypeError):
     print("Status line: invalid input")
     sys.exit(0)
 
+# debug：把真实输入 dump 到文件，便于排查字段（每次刷新覆盖）
+try:
+    with open(os.path.expanduser("~/.claude/status_line_input.json"), "w", encoding="utf-8") as _df:
+        json.dump(data, _df, ensure_ascii=False, indent=2)
+except Exception:
+    pass
+
 # ── 字段 ──────────────────────────────────────────────
 model = data.get("model", {})
 model_id = model.get("id") or model.get("display_name") or "?"
 model_name = model.get("display_name") or model_id
 if isinstance(model_name, str) and "/" in model_name:
     model_name = model_name.split("/")[-1]
+import re as _re2
+model_name = _re2.sub(r"\[\w+\]", "", model_name)  # 去掉 [1M]/[1m] 后缀
 provider = model.get("provider") or model.get("vendor") or model.get("supplier") or "?"
 
 # Token 使用（真实字段在 context_window.current_usage）
@@ -124,19 +133,20 @@ cost_obj = data.get("cost") or {}
 duration = cost_obj.get("total_duration_ms") or 0
 msg_count = data.get("message_count")
 
-# 花费：优先用价格库按 token 估算；库里没有则退回 total_cost_usd
-import re as _re
-_lookup_key = _re.sub(r"\[.*\]", "", model_name or "")
+# 花费：优先用 Claude Code 官方 total_cost_usd（准确）；
+# 只有它缺失时才用价格库按 token 粗略估算。
 _prices = load_prices()
+_lookup_key = _re2.sub(r"\[\w+\]", "", model_name or "")
 _entry = _prices.get(_lookup_key) or _prices.get(model_name)
+reported = cost_obj.get("total_cost_usd")
 cost_usd = None
-if _entry:
+if reported:
+    cost_usd = float(reported)
+elif _entry:
     cost_usd = (inp / 1e6 * _entry.get("input", 0)
                 + out / 1e6 * _entry.get("output", 0)
                 + (cache_read or 0) / 1e6 * _entry.get("cache_read", 0)
                 + (cache_write or 0) / 1e6 * _entry.get("cache_write", _entry.get("input", 0)))
-else:
-    cost_usd = cost_obj.get("total_cost_usd")
 
 # 当前目录
 cwd = data.get("cwd") or (data.get("workspace") or {}).get("current_dir") or ""
@@ -222,18 +232,13 @@ _weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日
 _now = datetime.now()
 parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.weekday()]}{NC}")
 
-# 第三行：计费明细（输入/输出/缓存 token → 各自花费）
-parts3 = []
-if _entry:
-    in_c  = inp / 1e6 * _entry.get("input", 0)
-    out_c = out / 1e6 * _entry.get("output", 0)
-    cr_c  = (cache_read or 0) / 1e6 * _entry.get("cache_read", 0)
-    cw_c  = (cache_write or 0) / 1e6 * _entry.get("cache_write", _entry.get("input", 0))
-    parts3.append(f"⬇ 输入 {fmt(inp)}→${in_c:.3f}  ⬆ 输出 {fmt(out)}→${out_c:.3f}")
-    if cache_read:
-        parts3.append(f"💾 缓存读 {fmt(cache_read)}→${cr_c:.3f}")
-    if cache_write:
-        parts3.append(f"✍️ 缓存写 {fmt(cache_write)}→${cw_c:.3f}")
+# 第三行：当前上下文的 token 构成（输入/输出/缓存），仅信息展示
+# 注意：这是当前上下文窗口的量，不是累计 API 用量（累计量状态栏拿不到，
+# 花费以官方 total_cost_usd 为准）。
+parts3 = [f"⬇ 输入 {fmt(inp)}  ⬆ 输出 {fmt(out)}"]
+if cache_read:
+    parts3.append(f"💾 缓存读 {fmt(cache_read)}")
+if cache_write:
+    parts3.append(f"✍️ 缓存写 {fmt(cache_write)}")
 
-_line3 = "\n" + "  ".join(parts3) if parts3 else ""
-print("  ".join(parts) + "\n" + "  ".join(parts2) + _line3)
+print("  ".join(parts) + "\n" + "  ".join(parts2) + "\n" + "  ".join(parts3))
