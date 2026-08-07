@@ -233,6 +233,10 @@ RED    = "\033[0;31m"
 DIM    = "\033[2m"
 NC     = "\033[0m"
 
+def dim(s):
+    return f"{DIM}{s}{NC}"
+SEP = f"{DIM} · {NC}"  # 组间分隔符
+
 # ── 拼接 ──────────────────────────────────────────────
 _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
 parts = [f"{CYAN}[{_model_tag}]{NC}"]
@@ -240,7 +244,8 @@ parts = [f"{CYAN}[{_model_tag}]{NC}"]
 # Token: ⬇ 输入 / ⬆ 输出（不同颜色）
 in_str = f"{GREEN}{fmt(inp)}{NC}"
 out_str = f"{MAGENTA}{fmt(out)}{NC}"
-parts.append(f"⬇ {in_str}  ⬆ {out_str}")
+parts.append(f"⬇ {in_str}")
+parts.append(f"⬆ {out_str}")
 
 # 缓存 💾
 cache_strs = []
@@ -312,27 +317,28 @@ if _cum_comp is not None:
     tot_out = sum(u["output"] for u in _cum_usage.values())
     tot_cr = sum(u["cache_read"] for u in _cum_usage.values())
     tot_cw = sum(u["cache_write"] for u in _cum_usage.values())
-    parts3.append(f"累计 输入 {fmt(tot_in)}→${in_c:.3f}  输出 {fmt(tot_out)}→${out_c:.3f}")
+    parts3.append(f"{dim('累计')} {dim('输入')} {fmt(tot_in)}→{GREEN}${in_c:.3f}{NC}  "
+                  f"{dim('输出')} {fmt(tot_out)}→{GREEN}${out_c:.3f}{NC}")
     if tot_cr:
-        parts3.append(f"缓存读 {fmt(tot_cr)}→${cr_c:.3f}")
+        parts3.append(f"{dim('缓存读')} {fmt(tot_cr)}→{GREEN}${cr_c:.3f}{NC}")
     if tot_cw:
-        parts3.append(f"缓存写 {fmt(tot_cw)}→${cw_c:.3f}")
+        parts3.append(f"{dim('缓存写')} {fmt(tot_cw)}→{GREEN}${cw_c:.3f}{NC}")
     # 输出速率（累计输出 token / 会话时长秒）
     if duration > 0 and tot_out > 0:
         rate = tot_out / (duration / 1000.0)
-        parts3.append(f"输出速率 {rate:.0f} tok/s")
+        parts3.append(f"{dim('输出速率')} {CYAN}{rate:.0f} tok/s{NC}")
 else:
-    parts3 = [f"输入 {fmt(inp)}  输出 {fmt(out)}"]
+    parts3 = [f"{dim('输入')} {fmt(inp)}  {dim('输出')} {fmt(out)}"]
     if cache_read:
-        parts3.append(f"缓存读 {fmt(cache_read)}")
+        parts3.append(f"{dim('缓存读')} {fmt(cache_read)}")
 
 # 第四行：跨模型时列出历史用过的所有模型及其花费
 parts4 = []
 if len(_cum_detail) > 1:
-    models_str = "  ".join(
-        f"{m} {GREEN}${d['cost']:.3f}{NC}" for m, d in
+    models_str = SEP.join(
+        f"{dim(m)} {GREEN}${d['cost']:.3f}{NC}" for m, d in
         sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]))
-    parts4.append(f"模型 {models_str}")
+    parts4.append(f"{dim('模型')} {models_str}")
 
-_line4 = "\n" + "  ".join(parts4) if parts4 else ""
-print("  ".join(parts) + "\n" + "  ".join(parts2) + "\n" + "  ".join(parts3) + _line4)
+_line4 = "\n" + SEP.join(parts4) if parts4 else ""
+print(SEP.join(parts) + "\n" + SEP.join(parts2) + "\n" + SEP.join(parts3) + _line4)
