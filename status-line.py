@@ -233,11 +233,12 @@ MAGENTA= "\033[0;35m"
 BLUE   = "\033[0;34m"
 RED    = "\033[0;31m"
 DIM    = "\033[2m"
+GRAY   = "\033[90m"  # 亮灰：黑底下仍清晰可读
 NC     = "\033[0m"
 
 def dim(s):
-    return f"{DIM}{s}{NC}"
-SEP = f"{DIM} · {NC}"  # 组间分隔符
+    return f"{GRAY}{s}{NC}"
+SEP = f"{GRAY} · {NC}"  # 组间分隔符（亮灰，黑底可读）
 
 # ── 拼接 ──────────────────────────────────────────────
 _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
