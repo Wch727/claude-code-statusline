@@ -169,16 +169,16 @@ parts = [f"{CYAN}[{_model_tag}]{NC}"]
 # Token: 输入 / 输出
 in_str = f"{GREEN}{fmt(inp)}{NC}"
 out_str = f"{GREEN}{fmt(out)}{NC}"
-parts.append(f"⬇ {in_str}  ⬆ {out_str}")
+parts.append(f"输入 {in_str}  输出 {out_str}")
 
 # 缓存
 cache_strs = []
 if cache_read:
-    cache_strs.append(f"读{fmt(cache_read)}")
+    cache_strs.append(f"读 {fmt(cache_read)}")
 if cache_write:
-    cache_strs.append(f"写{fmt(cache_write)}")
+    cache_strs.append(f"写 {fmt(cache_write)}")
 if cache_strs:
-    parts.append(f"💾 {','.join(cache_strs)}")
+    parts.append(f"缓存 {'/'.join(cache_strs)}")
 
 # Context 窗口（进度条 + 百分比；>70% 黄、>90% 红 + 剩余警示）
 if ctx_size:
@@ -186,13 +186,13 @@ if ctx_size:
         pct_val = used_pct
         bar_str = bar(pct_val)
         if pct_val > 90:
-            parts.append(f"{RED}▮ {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ 剩{remaining_pct}%{NC}")
+            parts.append(f"{RED}上下文 {fmt(ctx_size)} [{bar_str}] {pct_val}% 剩余 {remaining_pct}%{NC}")
         elif pct_val > 70:
-            parts.append(f"{YELLOW}▮ {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ 剩{remaining_pct}%{NC}")
+            parts.append(f"{YELLOW}上下文 {fmt(ctx_size)} [{bar_str}] {pct_val}% 剩余 {remaining_pct}%{NC}")
         else:
-            parts.append(f"{GREEN}▮ {fmt(ctx_size)} [{bar_str}] {pct_val}%{NC}")
+            parts.append(f"{GREEN}上下文 {fmt(ctx_size)} [{bar_str}] {pct_val}%{NC}")
     else:
-        parts.append(f"{DIM}▮ {fmt(ctx_size)}{NC}")
+        parts.append(f"{DIM}上下文 {fmt(ctx_size)}{NC}")
 
 # ── 第二行：花费 / 消息 / 目录 / 分支 / 时长 / 时钟 ──────
 parts2 = []
@@ -235,10 +235,10 @@ parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.
 # 第三行：当前上下文的 token 构成（输入/输出/缓存），仅信息展示
 # 注意：这是当前上下文窗口的量，不是累计 API 用量（累计量状态栏拿不到，
 # 花费以官方 total_cost_usd 为准）。
-parts3 = [f"⬇ 输入 {fmt(inp)}  ⬆ 输出 {fmt(out)}"]
+parts3 = [f"输入 {fmt(inp)}  输出 {fmt(out)}"]
 if cache_read:
-    parts3.append(f"💾 缓存读 {fmt(cache_read)}")
+    parts3.append(f"缓存读 {fmt(cache_read)}")
 if cache_write:
-    parts3.append(f"✍️ 缓存写 {fmt(cache_write)}")
+    parts3.append(f"缓存写 {fmt(cache_write)}")
 
 print("  ".join(parts) + "\n" + "  ".join(parts2) + "\n" + "  ".join(parts3))
