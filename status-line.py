@@ -202,6 +202,7 @@ remaining_pct = ctx.get("remaining_percentage")
 # 会话时长 / 花费 / 消息数
 cost_obj = data.get("cost") or {}
 duration = cost_obj.get("total_duration_ms") or 0
+api_duration = cost_obj.get("total_api_duration_ms") or 0  # 活跃 API 时长（排除空闲）
 msg_count = data.get("message_count")
 
 # 花费：按价格库 × transcript 累计用量（跨模型）。
@@ -218,6 +219,7 @@ if _transcript and os.path.exists(_transcript):
     _cum_cost, _cum_detail = cumulative_cost(_cum_usage, _prices)
     _cum_comp = _component_costs(_cum_usage, _prices)
 cost_usd = _cum_cost if _cum_cost is not None else float(cost_obj.get("total_cost_usd") or 0) or None
+_rate = get_usd_cny()  # 共享汇率，供各行 ¥ 换算
 
 # 当前目录
 cwd = data.get("cwd") or (data.get("workspace") or {}).get("current_dir") or ""
@@ -275,7 +277,6 @@ parts2 = []
 
 # 会话花费（$ + ¥，标注模型 + 供应商）
 if cost_usd is not None:
-    _rate = get_usd_cny()
     parts2.append(f"💰 {_model_tag} {GREEN}${float(cost_usd):.3f}{NC} "
                   f"({MAGENTA}¥{float(cost_usd) * _rate:.2f}{NC})")
 
@@ -317,27 +318,28 @@ if _cum_comp is not None:
     tot_out = sum(u["output"] for u in _cum_usage.values())
     tot_cr = sum(u["cache_read"] for u in _cum_usage.values())
     tot_cw = sum(u["cache_write"] for u in _cum_usage.values())
-    parts3.append(f"{dim('累计')} {dim('输入')} {fmt(tot_in)}→{GREEN}${in_c:.3f}{NC}  "
-                  f"{dim('输出')} {fmt(tot_out)}→{GREEN}${out_c:.3f}{NC}")
+    parts3.append(f"{dim('累计')} {dim('输入')} {fmt(tot_in)}→{GREEN}${in_c:.3f}{NC}/{MAGENTA}¥{in_c*_rate:.2f}{NC}  "
+                  f"{dim('输出')} {fmt(tot_out)}→{GREEN}${out_c:.3f}{NC}/{MAGENTA}¥{out_c*_rate:.2f}{NC}")
     if tot_cr:
-        parts3.append(f"{dim('缓存读')} {fmt(tot_cr)}→{GREEN}${cr_c:.3f}{NC}")
+        parts3.append(f"{dim('缓存读')} {fmt(tot_cr)}→{GREEN}${cr_c:.3f}{NC}/{MAGENTA}¥{cr_c*_rate:.2f}{NC}")
     if tot_cw:
-        parts3.append(f"{dim('缓存写')} {fmt(tot_cw)}→{GREEN}${cw_c:.3f}{NC}")
-    # 输出速率（累计输出 token / 会话时长秒）
-    if duration > 0 and tot_out > 0:
-        rate = tot_out / (duration / 1000.0)
+        parts3.append(f"{dim('缓存写')} {fmt(tot_cw)}→{GREEN}${cw_c:.3f}{NC}/{MAGENTA}¥{cw_c*_rate:.2f}{NC}")
+    # 输出速率（累计输出 token / 活跃 API 时长秒，排除思考/空闲）
+    gen_time = (api_duration or duration) / 1000.0
+    if gen_time > 0 and tot_out > 0:
+        rate = tot_out / gen_time
         parts3.append(f"{dim('输出速率')} {CYAN}{rate:.0f} tok/s{NC}")
 else:
     parts3 = [f"{dim('输入')} {fmt(inp)}  {dim('输出')} {fmt(out)}"]
     if cache_read:
         parts3.append(f"{dim('缓存读')} {fmt(cache_read)}")
 
-# 第四行：跨模型时列出历史用过的所有模型及其花费
+# 第四行：跨模型时列出历史用过的所有模型及其花费（$ + ¥）
 parts4 = []
 if len(_cum_detail) > 1:
     models_str = SEP.join(
-        f"{dim(m)} {GREEN}${d['cost']:.3f}{NC}" for m, d in
-        sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]))
+        f"{dim(m)} {GREEN}${d['cost']:.3f}{NC}/{MAGENTA}¥{d['cost']*_rate:.2f}{NC}"
+        for m, d in sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]))
     parts4.append(f"{dim('模型')} {models_str}")
 
 _line4 = "\n" + SEP.join(parts4) if parts4 else ""
