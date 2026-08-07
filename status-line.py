@@ -222,5 +222,18 @@ _weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日
 _now = datetime.now()
 parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.weekday()]}{NC}")
 
-# 第一行（模型/Token/缓存/上下文） + 换行 + 第二行
-print("  ".join(parts) + "\n" + "  ".join(parts2))
+# 第三行：计费明细（输入/输出/缓存 token → 各自花费）
+parts3 = []
+if _entry:
+    in_c  = inp / 1e6 * _entry.get("input", 0)
+    out_c = out / 1e6 * _entry.get("output", 0)
+    cr_c  = (cache_read or 0) / 1e6 * _entry.get("cache_read", 0)
+    cw_c  = (cache_write or 0) / 1e6 * _entry.get("cache_write", _entry.get("input", 0))
+    parts3.append(f"⬇ 输入 {fmt(inp)}→${in_c:.3f}  ⬆ 输出 {fmt(out)}→${out_c:.3f}")
+    if cache_read:
+        parts3.append(f"💾 缓存读 {fmt(cache_read)}→${cr_c:.3f}")
+    if cache_write:
+        parts3.append(f"✍️ 缓存写 {fmt(cache_write)}→${cw_c:.3f}")
+
+_line3 = "\n" + "  ".join(parts3) if parts3 else ""
+print("  ".join(parts) + "\n" + "  ".join(parts2) + _line3)
