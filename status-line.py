@@ -311,7 +311,9 @@ _now = datetime.now()
 parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.weekday()]}{NC}")
 
 # 第三行：累计话费明细（transcript 累计用量 × 价格库）+ 输出速率
-parts3 = []
+# 拆两行：输入/输出 一行，缓存读/写 + 输出速率 下一行（太长换行）
+parts3 = []   # 累计 输入/输出
+parts3b = []  # 缓存读/写 + 输出速率
 if _cum_comp is not None:
     in_c, out_c, cr_c, cw_c = _cum_comp
     tot_in = sum(u["input"] for u in _cum_usage.values())
@@ -321,20 +323,20 @@ if _cum_comp is not None:
     parts3.append(f"{dim('累计')} {dim('输入')} {fmt(tot_in)}→{GREEN}${in_c:.3f}{NC}/{MAGENTA}¥{in_c*_rate:.2f}{NC}  "
                   f"{dim('输出')} {fmt(tot_out)}→{GREEN}${out_c:.3f}{NC}/{MAGENTA}¥{out_c*_rate:.2f}{NC}")
     if tot_cr:
-        parts3.append(f"{dim('缓存读')} {fmt(tot_cr)}→{GREEN}${cr_c:.3f}{NC}/{MAGENTA}¥{cr_c*_rate:.2f}{NC}")
+        parts3b.append(f"{dim('缓存读')} {fmt(tot_cr)}→{GREEN}${cr_c:.3f}{NC}/{MAGENTA}¥{cr_c*_rate:.2f}{NC}")
     if tot_cw:
-        parts3.append(f"{dim('缓存写')} {fmt(tot_cw)}→{GREEN}${cw_c:.3f}{NC}/{MAGENTA}¥{cw_c*_rate:.2f}{NC}")
+        parts3b.append(f"{dim('缓存写')} {fmt(tot_cw)}→{GREEN}${cw_c:.3f}{NC}/{MAGENTA}¥{cw_c*_rate:.2f}{NC}")
     # 输出速率（累计输出 token / 活跃 API 时长秒，排除思考/空闲）
     gen_time = (api_duration or duration) / 1000.0
     if gen_time > 0 and tot_out > 0:
         rate = tot_out / gen_time
-        parts3.append(f"{dim('输出速率')} {CYAN}{rate:.0f} tok/s{NC}")
+        parts3b.append(f"{dim('输出速率')} {CYAN}{rate:.0f} tok/s{NC}")
 else:
     parts3 = [f"{dim('输入')} {fmt(inp)}  {dim('输出')} {fmt(out)}"]
     if cache_read:
-        parts3.append(f"{dim('缓存读')} {fmt(cache_read)}")
+        parts3b.append(f"{dim('缓存读')} {fmt(cache_read)}")
 
-# 第四行：跨模型时列出历史用过的所有模型及其花费（$ + ¥）
+# 第五行：跨模型时列出历史用过的所有模型及其花费（$ + ¥）
 parts4 = []
 if len(_cum_detail) > 1:
     models_str = SEP.join(
@@ -342,5 +344,6 @@ if len(_cum_detail) > 1:
         for m, d in sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]))
     parts4.append(f"{dim('模型')} {models_str}")
 
+_line3b = "\n" + SEP.join(parts3b) if parts3b else ""
 _line4 = "\n" + SEP.join(parts4) if parts4 else ""
-print(SEP.join(parts) + "\n" + SEP.join(parts2) + "\n" + SEP.join(parts3) + _line4)
+print(SEP.join(parts) + "\n" + SEP.join(parts2) + "\n" + SEP.join(parts3) + _line3b + _line4)
