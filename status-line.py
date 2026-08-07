@@ -76,6 +76,84 @@ def get_usd_cny():
 def fmt_price(x):
     return f"{x:.5f}".rstrip("0").rstrip(".")
 
+# ── 累计用量（增量读 transcript，避免每秒全量解析）────────
+USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
+
+def get_cumulative_usage(transcript_path):
+    """增量累计每模型的 token 用量（只处理新增行）。"""
+    cache = {"offset": 0, "usage": {}}
+    try:
+        with open(USAGE_CACHE, encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:
+        pass
+    if not isinstance(cache.get("usage"), dict):
+        cache["usage"] = {}
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            f.seek(int(cache.get("offset", 0)))
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") == "assistant":
+                    m = rec.get("message") or {}
+                    u = m.get("usage") or {}
+                    model = str(m.get("model") or "unknown")
+                    e = cache["usage"].setdefault(
+                        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+                    e["input"] += int(u.get("input_tokens", 0) or 0)
+                    e["output"] += int(u.get("output_tokens", 0) or 0)
+                    e["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
+                    e["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
+            cache["offset"] = f.tell()
+    except Exception:
+        pass
+    try:
+        with open(USAGE_CACHE, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+    return cache["usage"]
+
+def cumulative_cost(usage, prices):
+    """按价格库算出累计花费（跨模型求和）。返回 (总花费, 明细dict)。"""
+    total = 0.0
+    detail = {}
+    for model, u in usage.items():
+        key = _re2.sub(r"\[\w+\]", "", model) if model else ""
+        e = prices.get(key) or prices.get(model)
+        if not e:
+            continue
+        c = (u["input"] / 1e6 * e.get("input", 0)
+             + u["output"] / 1e6 * e.get("output", 0)
+             + u["cache_read"] / 1e6 * e.get("cache_read", 0)
+             + u["cache_write"] / 1e6 * e.get("cache_write", e.get("input", 0)))
+        total += c
+        detail[model] = {
+            "input": u["input"], "output": u["output"],
+            "cache_read": u["cache_read"], "cache_write": u["cache_write"], "cost": c,
+        }
+    return total, detail
+
+def _component_costs(usage, prices):
+    """跨模型累加每个分项（输入/输出/缓存读/缓存写）的花费。"""
+    in_c = out_c = cr_c = cw_c = 0.0
+    for model, u in usage.items():
+        key = _re2.sub(r"\[\w+\]", "", model) if model else ""
+        e = prices.get(key) or prices.get(model)
+        if not e:
+            continue
+        in_c += u["input"] / 1e6 * e.get("input", 0)
+        out_c += u["output"] / 1e6 * e.get("output", 0)
+        cr_c += u["cache_read"] / 1e6 * e.get("cache_read", 0)
+        cw_c += u["cache_write"] / 1e6 * e.get("cache_write", e.get("input", 0))
+    return in_c, out_c, cr_c, cw_c
+
 # 查单价：python ~/.claude/status-line.py --prices
 if len(sys.argv) > 1 and sys.argv[1] == "--prices":
     prices = load_prices()
@@ -99,13 +177,6 @@ try:
 except (json.JSONDecodeError, TypeError):
     print("Status line: invalid input")
     sys.exit(0)
-
-# debug：把真实输入 dump 到文件，便于排查字段（每次刷新覆盖）
-try:
-    with open(os.path.expanduser("~/.claude/status_line_input.json"), "w", encoding="utf-8") as _df:
-        json.dump(data, _df, ensure_ascii=False, indent=2)
-except Exception:
-    pass
 
 # ── 字段 ──────────────────────────────────────────────
 model = data.get("model", {})
@@ -133,20 +204,20 @@ cost_obj = data.get("cost") or {}
 duration = cost_obj.get("total_duration_ms") or 0
 msg_count = data.get("message_count")
 
-# 花费：优先用 Claude Code 官方 total_cost_usd（准确）；
-# 只有它缺失时才用价格库按 token 粗略估算。
+# 花费：按价格库 × transcript 累计用量（跨模型）。
+# transcript 不可读时才退回 Claude Code 的 total_cost_usd。
 _prices = load_prices()
 _lookup_key = _re2.sub(r"\[\w+\]", "", model_name or "")
 _entry = _prices.get(_lookup_key) or _prices.get(model_name)
-reported = cost_obj.get("total_cost_usd")
-cost_usd = None
-if reported:
-    cost_usd = float(reported)
-elif _entry:
-    cost_usd = (inp / 1e6 * _entry.get("input", 0)
-                + out / 1e6 * _entry.get("output", 0)
-                + (cache_read or 0) / 1e6 * _entry.get("cache_read", 0)
-                + (cache_write or 0) / 1e6 * _entry.get("cache_write", _entry.get("input", 0)))
+_transcript = data.get("transcript_path")
+_cum_usage = {}
+_cum_cost = None
+_cum_comp = None
+if _transcript and os.path.exists(_transcript):
+    _cum_usage = get_cumulative_usage(_transcript)
+    _cum_cost, _cum_detail = cumulative_cost(_cum_usage, _prices)
+    _cum_comp = _component_costs(_cum_usage, _prices)
+cost_usd = _cum_cost if _cum_cost is not None else float(cost_obj.get("total_cost_usd") or 0) or None
 
 # 当前目录
 cwd = data.get("cwd") or (data.get("workspace") or {}).get("current_dir") or ""
@@ -232,13 +303,26 @@ _weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日
 _now = datetime.now()
 parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.weekday()]}{NC}")
 
-# 第三行：当前上下文的 token 构成（输入/输出/缓存），仅信息展示
-# 注意：这是当前上下文窗口的量，不是累计 API 用量（累计量状态栏拿不到，
-# 花费以官方 total_cost_usd 为准）。
-parts3 = [f"输入 {fmt(inp)}  输出 {fmt(out)}"]
-if cache_read:
-    parts3.append(f"缓存读 {fmt(cache_read)}")
-if cache_write:
-    parts3.append(f"缓存写 {fmt(cache_write)}")
+# 第三行：累计话费明细（transcript 累计用量 × 价格库）+ 输出速率
+parts3 = []
+if _cum_comp is not None:
+    in_c, out_c, cr_c, cw_c = _cum_comp
+    tot_in = sum(u["input"] for u in _cum_usage.values())
+    tot_out = sum(u["output"] for u in _cum_usage.values())
+    tot_cr = sum(u["cache_read"] for u in _cum_usage.values())
+    tot_cw = sum(u["cache_write"] for u in _cum_usage.values())
+    parts3.append(f"累计 输入 {fmt(tot_in)}→${in_c:.3f}  输出 {fmt(tot_out)}→${out_c:.3f}")
+    if tot_cr:
+        parts3.append(f"缓存读 {fmt(tot_cr)}→${cr_c:.3f}")
+    if tot_cw:
+        parts3.append(f"缓存写 {fmt(tot_cw)}→${cw_c:.3f}")
+    # 输出速率（累计输出 token / 会话时长秒）
+    if duration > 0 and tot_out > 0:
+        rate = tot_out / (duration / 1000.0)
+        parts3.append(f"输出速率 {rate:.0f} tok/s")
+else:
+    parts3 = [f"输入 {fmt(inp)}  输出 {fmt(out)}"]
+    if cache_read:
+        parts3.append(f"缓存读 {fmt(cache_read)}")
 
 print("  ".join(parts) + "\n" + "  ".join(parts2) + "\n" + "  ".join(parts3))
