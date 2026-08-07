@@ -237,33 +237,33 @@ NC     = "\033[0m"
 _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
 parts = [f"{CYAN}[{_model_tag}]{NC}"]
 
-# Token: 输入 / 输出
+# Token: ⬇ 输入 / ⬆ 输出（不同颜色）
 in_str = f"{GREEN}{fmt(inp)}{NC}"
-out_str = f"{GREEN}{fmt(out)}{NC}"
-parts.append(f"输入 {in_str}  输出 {out_str}")
+out_str = f"{MAGENTA}{fmt(out)}{NC}"
+parts.append(f"⬇ {in_str}  ⬆ {out_str}")
 
-# 缓存
+# 缓存 💾
 cache_strs = []
 if cache_read:
     cache_strs.append(f"读 {fmt(cache_read)}")
 if cache_write:
     cache_strs.append(f"写 {fmt(cache_write)}")
 if cache_strs:
-    parts.append(f"缓存 {'/'.join(cache_strs)}")
+    parts.append(f"💾 {CYAN}{','.join(cache_strs)}{NC}")
 
-# Context 窗口（进度条 + 百分比；>70% 黄、>90% 红 + 剩余警示）
+# 上下文 ▮ 进度条（≤70% 绿、71–90% 黄、>90% 红 + ⚠ 剩余）
 if ctx_size:
     if used_pct is not None:
         pct_val = used_pct
         bar_str = bar(pct_val)
         if pct_val > 90:
-            parts.append(f"{RED}上下文 {fmt(ctx_size)} [{bar_str}] {pct_val}% 剩余 {remaining_pct}%{NC}")
+            parts.append(f"{RED}▮ {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ 剩{remaining_pct}%{NC}")
         elif pct_val > 70:
-            parts.append(f"{YELLOW}上下文 {fmt(ctx_size)} [{bar_str}] {pct_val}% 剩余 {remaining_pct}%{NC}")
+            parts.append(f"{YELLOW}▮ {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ 剩{remaining_pct}%{NC}")
         else:
-            parts.append(f"{GREEN}上下文 {fmt(ctx_size)} [{bar_str}] {pct_val}%{NC}")
+            parts.append(f"{GREEN}▮ {fmt(ctx_size)} [{bar_str}] {pct_val}%{NC}")
     else:
-        parts.append(f"{DIM}上下文 {fmt(ctx_size)}{NC}")
+        parts.append(f"{DIM}▮ {fmt(ctx_size)}{NC}")
 
 # ── 第二行：花费 / 消息 / 目录 / 分支 / 时长 / 时钟 ──────
 parts2 = []
@@ -271,7 +271,8 @@ parts2 = []
 # 会话花费（$ + ¥，标注模型 + 供应商）
 if cost_usd is not None:
     _rate = get_usd_cny()
-    parts2.append(f"💰 {_model_tag} ${float(cost_usd):.3f} (¥{float(cost_usd) * _rate:.2f})")
+    parts2.append(f"💰 {_model_tag} {GREEN}${float(cost_usd):.3f}{NC} "
+                  f"({MAGENTA}¥{float(cost_usd) * _rate:.2f}{NC})")
 
 # 消息数
 if msg_count is not None:
@@ -325,4 +326,13 @@ else:
     if cache_read:
         parts3.append(f"缓存读 {fmt(cache_read)}")
 
-print("  ".join(parts) + "\n" + "  ".join(parts2) + "\n" + "  ".join(parts3))
+# 第四行：跨模型时列出历史用过的所有模型及其花费
+parts4 = []
+if len(_cum_detail) > 1:
+    models_str = "  ".join(
+        f"{m} {GREEN}${d['cost']:.3f}{NC}" for m, d in
+        sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]))
+    parts4.append(f"模型 {models_str}")
+
+_line4 = "\n" + "  ".join(parts4) if parts4 else ""
+print("  ".join(parts) + "\n" + "  ".join(parts2) + "\n" + "  ".join(parts3) + _line4)
