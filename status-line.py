@@ -80,18 +80,30 @@ def fmt_price(x):
 USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
 
 def get_cumulative_usage(transcript_path):
-    """增量累计每模型的 token 用量（只处理新增行）。"""
-    cache = {"offset": 0, "usage": {}}
+    """增量累计每模型的 token 用量（按会话/transcript 隔离，只处理新增行）。
+
+    缓存结构：``{ transcript_path: {"offset": int, "usage": {...}} }``。
+    每个会话独立累计，避免把不同会话的 token/花费混在一起。
+    """
+    cache = {}
     try:
         with open(USAGE_CACHE, encoding="utf-8") as f:
-            cache = json.load(f)
+            raw = json.load(f)
+            if isinstance(raw, dict):
+                cache = raw
     except Exception:
         pass
-    if not isinstance(cache.get("usage"), dict):
-        cache["usage"] = {}
+    # 迁移旧格式：旧缓存是全局 {"offset":..,"usage":..}（跨会话混算），
+    # 无法归因到具体会话，直接丢弃，改按会话重新累计。
+    if "usage" in cache and "offset" in cache:
+        cache = {}
+    session = cache.setdefault(transcript_path, {"offset": 0, "usage": {}})
+    usage = session["usage"]
+    if not isinstance(usage, dict):
+        usage = session["usage"] = {}
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
-            f.seek(int(cache.get("offset", 0)))
+            f.seek(int(session.get("offset", 0)))
             for line in f:
                 line = line.strip()
                 if not line:
@@ -104,21 +116,25 @@ def get_cumulative_usage(transcript_path):
                     m = rec.get("message") or {}
                     u = m.get("usage") or {}
                     model = str(m.get("model") or "unknown")
-                    e = cache["usage"].setdefault(
+                    e = usage.setdefault(
                         model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
                     e["input"] += int(u.get("input_tokens", 0) or 0)
                     e["output"] += int(u.get("output_tokens", 0) or 0)
                     e["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
                     e["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
-            cache["offset"] = f.tell()
+            session["offset"] = f.tell()
     except Exception:
         pass
+    # 精简：只保留文件仍存在的会话，避免缓存无限增长。
+    for p in list(cache.keys()):
+        if not os.path.exists(p):
+            cache.pop(p, None)
     try:
         with open(USAGE_CACHE, "w", encoding="utf-8") as f:
             json.dump(cache, f)
     except Exception:
         pass
-    return cache["usage"]
+    return usage
 
 def cumulative_cost(usage, prices):
     """按价格库算出累计花费（跨模型求和，区分本币）。
