@@ -1,7 +1,17 @@
 {
-  "_comment": "每 1M token 单价。currency=CNY 的模型（deepseek 等 .cn 国产模型）价格以人民币原生计费，直接显示 ¥；其余为美元（$），显示时按实时汇率换算 ¥。deepseek .cn 价格源：DeepSeek 开放平台（2026-08，缓存命中/未命中）。改价格后 status line 自动生效。查单价：python ~/.claude/status-line.py --prices。",
-  "deepseek-v4-flash": { "provider": "deepseek", "currency": "CNY", "input": 1.0, "cache_read": 0.02, "cache_write": 1.0, "output": 2.0 },
-  "deepseek-v4-pro": { "provider": "deepseek", "currency": "CNY", "input": 3.0, "cache_read": 0.025, "cache_write": 3.0, "output": 6.0 },
+  "_comment": "每 1M token 单价。currency=CNY 的模型（deepseek 等 .cn 国产模型）价格以人民币原生计费，直接显示 ¥；其余为美元（$），显示时按实时汇率换算 ¥。deepseek .cn 价格源：DeepSeek 开放平台。2026-08-17 00:00（北京）起 deepseek-v4 改峰谷定价：legacy=旧固定价(<8-17)，peak=高峰(北京 9:00-12:00、14:00-18:00)，offpeak=空闲(其余，=高峰价一半)。改价格后 status line 自动生效。查单价：python ~/.claude/status-line.py --prices。",
+  "deepseek-v4-flash": {
+    "provider": "deepseek", "currency": "CNY",
+    "legacy":  { "input": 1.0, "cache_read": 0.02, "cache_write": 1.0, "output": 2.0 },
+    "peak":    { "input": 3.0, "cache_read": 0.10, "cache_write": 3.0, "output": 9.0 },
+    "offpeak": { "input": 1.5, "cache_read": 0.05, "cache_write": 1.5, "output": 4.5 }
+  },
+  "deepseek-v4-pro": {
+    "provider": "deepseek", "currency": "CNY",
+    "legacy":  { "input": 3.0, "cache_read": 0.025, "cache_write": 3.0, "output": 6.0 },
+    "peak":    { "input": 9.0, "cache_read": 0.30, "cache_write": 9.0, "output": 27.0 },
+    "offpeak": { "input": 4.5, "cache_read": 0.15, "cache_write": 4.5, "output": 13.5 }
+  },
   "kimi-k3": { "provider": "moonshot", "input": 3.0, "cache_read": 0.3, "output": 15.0 },
   "kimi-k2.6": { "provider": "moonshot", "input": 0.95, "cache_read": 0.19, "output": 4.0 },
   "kimi-k2.5": { "provider": "moonshot", "input": 0.6, "cache_read": 0.15, "output": 3.0 },

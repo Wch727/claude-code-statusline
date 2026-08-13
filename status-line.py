@@ -4,7 +4,7 @@
 import json
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -78,12 +78,43 @@ def fmt_price(x):
 
 # ── 累计用量（增量读 transcript，避免每秒全量解析）────────
 USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
+CACHE_VERSION = 2  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
+BUCKETS = ("legacy", "peak", "offpeak")
+_CN_TZ = timezone(timedelta(hours=8))
+_PEAK_START = datetime(2026, 8, 17, 0, 0, 0, tzinfo=_CN_TZ)  # 峰谷定价生效时刻（北京）
+
+def _zero_usage():
+    return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+
+def classify_bucket(ts):
+    """按消息时间戳返回 legacy / peak / offpeak。
+
+    - < 2026-08-17 00:00（北京）：legacy（旧固定单价）
+    - 高峰（北京 9:00–12:00、14:00–18:00）：peak
+    - 其余：offpeak（= 高峰价的一半）
+    """
+    if not ts:
+        return "legacy"
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:
+        return "legacy"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    bj = dt.astimezone(_CN_TZ)
+    if bj < _PEAK_START:
+        return "legacy"
+    h = bj.hour
+    if (9 <= h < 12) or (14 <= h < 18):
+        return "peak"
+    return "offpeak"
 
 def get_cumulative_usage(transcript_path):
-    """增量累计每模型的 token 用量（按会话/transcript 隔离，只处理新增行）。
+    """增量累计每模型的 token 用量（按会话隔离 + 按峰谷时段分桶，只处理新增行）。
 
-    缓存结构：``{ transcript_path: {"offset": int, "usage": {...}} }``。
-    每个会话独立累计，避免把不同会话的 token/花费混在一起。
+    缓存结构：``{ "_version": 2, transcript_path: {"offset": int, "usage": {model: {bucket: {…}}}} }``。
+    bucket ∈ {legacy, peak, offpeak}，每个 bucket 记录 input/output/cache_read/cache_write。
+    旧格式缓存（全局或扁平 usage）通过 ``_version`` 判定后自动作废重算。
     """
     cache = {}
     try:
@@ -93,10 +124,8 @@ def get_cumulative_usage(transcript_path):
                 cache = raw
     except Exception:
         pass
-    # 迁移旧格式：旧缓存是全局 {"offset":..,"usage":..}（跨会话混算），
-    # 无法归因到具体会话，直接丢弃，改按会话重新累计。
-    if "usage" in cache and "offset" in cache:
-        cache = {}
+    if cache.get("_version") != CACHE_VERSION:
+        cache = {"_version": CACHE_VERSION}
     session = cache.setdefault(transcript_path, {"offset": 0, "usage": {}})
     usage = session["usage"]
     if not isinstance(usage, dict):
@@ -116,18 +145,21 @@ def get_cumulative_usage(transcript_path):
                     m = rec.get("message") or {}
                     u = m.get("usage") or {}
                     model = str(m.get("model") or "unknown")
-                    e = usage.setdefault(
-                        model, {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
-                    e["input"] += int(u.get("input_tokens", 0) or 0)
-                    e["output"] += int(u.get("output_tokens", 0) or 0)
-                    e["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
-                    e["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
+                    bucket = classify_bucket(rec.get("timestamp"))
+                    e = usage.get(model)
+                    if not isinstance(e, dict) or not any(b in e for b in BUCKETS):
+                        e = usage[model] = {b: _zero_usage() for b in BUCKETS}
+                    b = e.setdefault(bucket, _zero_usage())
+                    b["input"] += int(u.get("input_tokens", 0) or 0)
+                    b["output"] += int(u.get("output_tokens", 0) or 0)
+                    b["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
+                    b["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
             session["offset"] = f.tell()
     except Exception:
         pass
     # 精简：只保留文件仍存在的会话，避免缓存无限增长。
     for p in list(cache.keys()):
-        if not os.path.exists(p):
+        if p != "_version" and not os.path.exists(p):
             cache.pop(p, None)
     try:
         with open(USAGE_CACHE, "w", encoding="utf-8") as f:
@@ -135,6 +167,20 @@ def get_cumulative_usage(transcript_path):
     except Exception:
         pass
     return usage
+
+def _bucket_rate(entry, bucket):
+    """返回指定 bucket 的单价子表；扁平模型（无 legacy/peak/offpeak）三桶同价。"""
+    if not isinstance(entry, dict):
+        return {}
+    if any(b in entry for b in BUCKETS):
+        return entry.get(bucket) or {}
+    return entry  # 扁平模型：自身即单价表
+
+def _usage_total(u, field):
+    """跨桶汇总某字段；兼容旧扁平 usage（无分桶）。"""
+    if any(b in u for b in BUCKETS):
+        return sum((u.get(b) or {}).get(field, 0) for b in BUCKETS)
+    return u.get(field, 0)
 
 def cumulative_cost(usage, prices):
     """按价格库算出累计花费（跨模型求和，区分本币）。
@@ -145,7 +191,8 @@ def cumulative_cost(usage, prices):
     - 其余模型按 USD 计费，显示时再乘实时汇率换算 ¥。
 
     ``detail[model]`` 含分项金额 ``cost_in/cost_out/cost_cr/cost_cw``
-    （均以该模型本币为单位）供花费明细行使用。
+    （均以该模型本币为单位）供花费明细行使用。峰谷模型按 legacy/peak/offpeak
+    三档分别计价后求和；扁平模型三桶同价。
     """
     total_usd = 0.0
     total_cny = 0.0
@@ -156,36 +203,37 @@ def cumulative_cost(usage, prices):
         if not e:
             continue
         currency = str(e.get("currency", "USD") or "USD").upper()
-        in_c = u["input"] / 1e6 * e.get("input", 0)
-        out_c = u["output"] / 1e6 * e.get("output", 0)
-        cr_c = u["cache_read"] / 1e6 * e.get("cache_read", 0)
-        cw_c = u["cache_write"] / 1e6 * e.get("cache_write", e.get("input", 0))
+        if not any(b in u for b in BUCKETS):
+            u = {"legacy": u}  # 兼容旧扁平 usage
+        in_c = out_c = cr_c = cw_c = 0.0
+        tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        for bucket in BUCKETS:
+            ub = u.get(bucket)
+            if not isinstance(ub, dict):
+                continue
+            rate = _bucket_rate(e, bucket)
+            if not rate:
+                continue
+            i = ub.get("input", 0); o = ub.get("output", 0)
+            cr = ub.get("cache_read", 0); cw = ub.get("cache_write", 0)
+            in_c += i / 1e6 * rate.get("input", 0)
+            out_c += o / 1e6 * rate.get("output", 0)
+            cr_c += cr / 1e6 * rate.get("cache_read", 0)
+            cw_c += cw / 1e6 * rate.get("cache_write", rate.get("input", 0))
+            tok["input"] += i; tok["output"] += o
+            tok["cache_read"] += cr; tok["cache_write"] += cw
         c = in_c + out_c + cr_c + cw_c
         if currency == "CNY":
             total_cny += c
         else:
             total_usd += c
         detail[model] = {
-            "input": u["input"], "output": u["output"],
-            "cache_read": u["cache_read"], "cache_write": u["cache_write"],
+            "input": tok["input"], "output": tok["output"],
+            "cache_read": tok["cache_read"], "cache_write": tok["cache_write"],
             "cost": c, "currency": currency,
             "cost_in": in_c, "cost_out": out_c, "cost_cr": cr_c, "cost_cw": cw_c,
         }
     return total_usd, total_cny, detail
-
-def _component_costs(usage, prices):
-    """跨模型累加每个分项（输入/输出/缓存读/缓存写）的花费。"""
-    in_c = out_c = cr_c = cw_c = 0.0
-    for model, u in usage.items():
-        key = _re2.sub(r"\[\w+\]", "", model) if model else ""
-        e = prices.get(key) or prices.get(model)
-        if not e:
-            continue
-        in_c += u["input"] / 1e6 * e.get("input", 0)
-        out_c += u["output"] / 1e6 * e.get("output", 0)
-        cr_c += u["cache_read"] / 1e6 * e.get("cache_read", 0)
-        cw_c += u["cache_write"] / 1e6 * e.get("cache_write", e.get("input", 0))
-    return in_c, out_c, cr_c, cw_c
 
 # 查单价：python ~/.claude/status-line.py --prices
 if len(sys.argv) > 1 and sys.argv[1] == "--prices":
@@ -198,11 +246,21 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
         if name.startswith("_"):
             continue
         currency = str(p.get("currency", "USD") or "USD").upper()
-        inp, out = p.get("input", 0), p.get("output", 0)
-        cr = p.get("cache_read", 0)
         unit = "¥" if currency == "CNY" else "$"
-        print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4} "
-              f"{unit}{fmt_price(inp):>8} {unit}{fmt_price(out):>8} {unit}{fmt_price(cr):>10}")
+        if any(b in p for b in BUCKETS):
+            print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4}  峰谷定价：")
+            for bucket in ("legacy", "offpeak", "peak"):
+                r = p.get(bucket)
+                if not r:
+                    continue
+                print(f"    {bucket:<8} in {unit}{fmt_price(r.get('input',0)):>8}  "
+                      f"out {unit}{fmt_price(r.get('output',0)):>8}  "
+                      f"cache-read {unit}{fmt_price(r.get('cache_read',0)):>10}")
+        else:
+            inp, out = p.get("input", 0), p.get("output", 0)
+            cr = p.get("cache_read", 0)
+            print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4} "
+                  f"{unit}{fmt_price(inp):>8} {unit}{fmt_price(out):>8} {unit}{fmt_price(cr):>10}")
     sys.exit(0)
 
 # ── 解析 ──────────────────────────────────────────────
@@ -248,12 +306,10 @@ _transcript = data.get("transcript_path")
 _cum_usage = {}
 _cum_usd = None
 _cum_cny = None
-_cum_comp = None
 _cum_detail = {}
 if _transcript and os.path.exists(_transcript):
     _cum_usage = get_cumulative_usage(_transcript)
     _cum_usd, _cum_cny, _cum_detail = cumulative_cost(_cum_usage, _prices)
-    _cum_comp = _component_costs(_cum_usage, _prices)
 # transcript 不可读时退回 Claude Code 的 total_cost_usd（仅当有 USD 模型）。
 _cost_usd_total = _cum_usd if _cum_usd is not None else float(cost_obj.get("total_cost_usd") or 0) or None
 _rate = get_usd_cny()  # 共享汇率，供各行 ¥ 换算
@@ -374,7 +430,7 @@ parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.
 
 # 输出速率（累计输出 token / 活跃 API 时长秒）放第一行
 _gen_time = (api_duration or duration) / 1000.0
-_tot_out = sum(u["output"] for u in _cum_usage.values())
+_tot_out = sum(_usage_total(u, "output") for u in _cum_usage.values())
 if _gen_time > 0 and _tot_out > 0:
     parts.append(f"{dim('rate')} {CYAN}{_tot_out/_gen_time:.0f} token/s{NC}")
 
