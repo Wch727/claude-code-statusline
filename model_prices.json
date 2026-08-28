@@ -18,6 +18,12 @@
     "peak":    { "input": 3.0, "cache_read": 0.3, "cache_write": 3.0, "output": 9.0 },
     "offpeak": { "input": 1.5, "cache_read": 0.15, "cache_write": 1.5, "output": 4.5 }
   },
+  "deepseek-v4-flash-vision-exp": {
+    "provider": "deepseek", "currency": "CNY",
+    "legacy":  { "input": 1.0, "cache_read": 0.02, "cache_write": 1.0, "output": 2.0 },
+    "peak":    { "input": 3.0, "cache_read": 0.10, "cache_write": 3.0, "output": 9.0 },
+    "offpeak": { "input": 1.5, "cache_read": 0.05, "cache_write": 1.5, "output": 4.5 }
+  },
   "kimi-k3": { "provider": "moonshot", "currency": "CNY", "input": 20.0, "cache_read": 2.0, "output": 100.0 },
   "kimi-k2.6": { "provider": "moonshot", "currency": "CNY", "input": 6.5, "cache_read": 1.1, "output": 27.0 },
   "kimi-k2.5": { "provider": "moonshot", "currency": "CNY", "input": 4.0, "cache_read": 0.7, "output": 21.0 },
