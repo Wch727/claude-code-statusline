@@ -78,7 +78,7 @@ def fmt_price(x):
 
 # ── 累计用量（增量读 transcript，避免每秒全量解析）────────
 USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
-CACHE_VERSION = 4  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
+CACHE_VERSION = 5  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
 BUCKETS = ("legacy", "peak", "offpeak")
 _CN_TZ = timezone(timedelta(hours=8))
 _PEAK_START = datetime(2026, 8, 17, 0, 0, 0, tzinfo=_CN_TZ)  # 峰谷定价生效时刻（北京）
@@ -123,13 +123,31 @@ def classify_bucket(ts, model=None):
         return "peak"
     return "offpeak"
 
-def get_cumulative_usage(transcript_path):
-    """增量累计每模型的 token 用量（按会话隔离 + 按峰谷时段分桶，只处理新增行）。
+def classify_segment(ts, model, input_tokens, prices):
+    """返回计费分段 key：峰谷模型的 legacy/peak/offpeak，长上下文模型的 short/long，其余 flat。
 
-    缓存结构：``{ "_version": 2, transcript_path: {"offset": int, "usage": {model: {bucket: {…}}}} }``。
-    bucket ∈ {legacy, peak, offpeak}，每个 bucket 记录 input/output/cache_read/cache_write。
-    旧格式缓存（全局或扁平 usage）通过 ``_version`` 判定后自动作废重算。
+    - 峰谷模型（价格表含 legacy/peak/offpeak）：沿用 classify_bucket 的时间分档
+    - 长上下文模型（价格表含 long_threshold）：单条消息输入 token 超过阈值 → long，否则 short
+    - 扁平模型：flat（无分档）
     """
+    key = (model or "").split("[")[0]
+    entry = (prices or {}).get(key) or (prices or {}).get(model)
+    if isinstance(entry, dict) and any(b in entry for b in BUCKETS):
+        return classify_bucket(ts, model)
+    if isinstance(entry, dict) and "long" in entry:
+        return "long" if (input_tokens or 0) > entry.get("long_threshold", 0) else "short"
+    return "flat"
+
+def get_cumulative_usage(transcript_path, prices=None):
+    """增量累计每模型的 token 用量（按会话隔离 + 按计费分段，只处理新增行）。
+
+    缓存结构：``{ "_version": 5, transcript_path: {"offset": int, "usage": {model: {segment: {…}}}} }``。
+    segment ∈ {legacy,peak,offpeak}（峰谷）或 {short,long}（长上下文）或 {flat}（扁平），
+    每个 segment 记录 input/output/cache_read/cache_write。
+    旧格式缓存通过 ``_version`` 判定后自动作废重算。
+    """
+    if prices is None:
+        prices = load_prices()
     cache = {}
     try:
         with open(USAGE_CACHE, encoding="utf-8") as f:
@@ -159,12 +177,13 @@ def get_cumulative_usage(transcript_path):
                     m = rec.get("message") or {}
                     u = m.get("usage") or {}
                     model = str(m.get("model") or "unknown")
-                    bucket = classify_bucket(rec.get("timestamp"), model)
+                    input_tokens = int(u.get("input_tokens", 0) or 0)
+                    seg = classify_segment(rec.get("timestamp"), model, input_tokens, prices)
                     e = usage.get(model)
-                    if not isinstance(e, dict) or not any(b in e for b in BUCKETS):
-                        e = usage[model] = {b: _zero_usage() for b in BUCKETS}
-                    b = e.setdefault(bucket, _zero_usage())
-                    b["input"] += int(u.get("input_tokens", 0) or 0)
+                    if not isinstance(e, dict):
+                        e = usage[model] = {}
+                    b = e.setdefault(seg, _zero_usage())
+                    b["input"] += input_tokens
                     b["output"] += int(u.get("output_tokens", 0) or 0)
                     b["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
                     b["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
@@ -182,19 +201,28 @@ def get_cumulative_usage(transcript_path):
         pass
     return usage
 
-def _bucket_rate(entry, bucket):
-    """返回指定 bucket 的单价子表；扁平模型（无 legacy/peak/offpeak）三桶同价。"""
+def _segment_rate(entry, seg):
+    """返回指定分段的单价子表。
+
+    - 峰谷模型（含 legacy/peak/offpeak）：取 entry[seg]
+    - 长上下文模型（含 long）：seg == "long" 取 entry["long"]，否则取 entry 自身
+    - 扁平模型：自身即单价表
+    """
     if not isinstance(entry, dict):
         return {}
     if any(b in entry for b in BUCKETS):
-        return entry.get(bucket) or {}
-    return entry  # 扁平模型：自身即单价表
+        return entry.get(seg) or {}
+    if seg == "long" and "long" in entry:
+        return entry.get("long") or {}
+    return entry
 
 def _usage_total(u, field):
-    """跨桶汇总某字段；兼容旧扁平 usage（无分桶）。"""
-    if any(b in u for b in BUCKETS):
-        return sum((u.get(b) or {}).get(field, 0) for b in BUCKETS)
-    return u.get(field, 0)
+    """跨分段汇总某字段；兼容旧扁平 usage（直接是 token 表）。"""
+    if not isinstance(u, dict):
+        return 0
+    if "input" in u or "output" in u:
+        return u.get(field, 0)
+    return sum((v or {}).get(field, 0) for v in u.values() if isinstance(v, dict))
 
 def cumulative_cost(usage, prices):
     """按价格库算出累计花费（跨模型求和，区分本币）。
@@ -217,15 +245,16 @@ def cumulative_cost(usage, prices):
         if not e:
             continue
         currency = str(e.get("currency", "USD") or "USD").upper()
-        if not any(b in u for b in BUCKETS):
-            u = {"legacy": u}  # 兼容旧扁平 usage
+        if not isinstance(u, dict):
+            continue
+        if not any(isinstance(v, dict) for v in u.values()):
+            u = {"flat": u}  # 兼容旧扁平 usage
         in_c = out_c = cr_c = cw_c = 0.0
         tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
-        for bucket in BUCKETS:
-            ub = u.get(bucket)
+        for seg, ub in u.items():
             if not isinstance(ub, dict):
                 continue
-            rate = _bucket_rate(e, bucket)
+            rate = _segment_rate(e, seg)
             if not rate:
                 continue
             i = ub.get("input", 0); o = ub.get("output", 0)
@@ -268,6 +297,15 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
                 if not r:
                     continue
                 print(f"    {bucket:<8} in {unit}{fmt_price(r.get('input',0)):>8}  "
+                      f"out {unit}{fmt_price(r.get('output',0)):>8}  "
+                      f"cache-read {unit}{fmt_price(r.get('cache_read',0)):>10}")
+        elif "long" in p:
+            print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4}  长上下文分档（阈值 {p.get('long_threshold',0)}）：")
+            for seg in ("short", "long"):
+                r = p if seg == "short" else p.get("long")
+                if not r:
+                    continue
+                print(f"    {seg:<8} in {unit}{fmt_price(r.get('input',0)):>8}  "
                       f"out {unit}{fmt_price(r.get('output',0)):>8}  "
                       f"cache-read {unit}{fmt_price(r.get('cache_read',0)):>10}")
         else:
@@ -322,7 +360,7 @@ _cum_usd = None
 _cum_cny = None
 _cum_detail = {}
 if _transcript and os.path.exists(_transcript):
-    _cum_usage = get_cumulative_usage(_transcript)
+    _cum_usage = get_cumulative_usage(_transcript, _prices)
     _cum_usd, _cum_cny, _cum_detail = cumulative_cost(_cum_usage, _prices)
 # transcript 不可读时退回 Claude Code 的 total_cost_usd（仅当有 USD 模型）。
 _cost_usd_total = _cum_usd if _cum_usd is not None else float(cost_obj.get("total_cost_usd") or 0) or None
