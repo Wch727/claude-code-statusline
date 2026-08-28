@@ -78,20 +78,25 @@ def fmt_price(x):
 
 # ── 累计用量（增量读 transcript，避免每秒全量解析）────────
 USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
-CACHE_VERSION = 2  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
+CACHE_VERSION = 4  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
 BUCKETS = ("legacy", "peak", "offpeak")
 _CN_TZ = timezone(timedelta(hours=8))
 _PEAK_START = datetime(2026, 8, 17, 0, 0, 0, tzinfo=_CN_TZ)  # 峰谷定价生效时刻（北京）
+_WEEKEND_START = datetime(2026, 8, 23, 0, 0, 0, tzinfo=_CN_TZ)  # 周末全天低谷生效时刻（北京）
+
+# 百炼平台模型：峰谷时段与 DeepSeek 官方不同（百炼空闲 22:00–8:00，其余高峰）
+_BAILIAN_MODELS = {"deepseek-v4-flash-0731"}
 
 def _zero_usage():
     return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
 
-def classify_bucket(ts):
-    """按消息时间戳返回 legacy / peak / offpeak。
+def classify_bucket(ts, model=None):
+    """按消息时间戳 + 模型返回 legacy / peak / offpeak。
 
     - < 2026-08-17 00:00（北京）：legacy（旧固定单价）
-    - 高峰（北京 9:00–12:00、14:00–18:00）：peak
-    - 其余：offpeak（= 高峰价的一半）
+    - 百炼平台模型（如 deepseek-v4-flash-0731）：高峰 8:00–22:00，空闲 22:00–8:00
+    - DeepSeek 官方模型：高峰 9:00–12:00、14:00–18:00，其余空闲
+    - 2026-08-23 00:00（北京）起：周末（周六/周日）全天按低谷（offpeak）计费
     """
     if not ts:
         return "legacy"
@@ -104,8 +109,17 @@ def classify_bucket(ts):
     bj = dt.astimezone(_CN_TZ)
     if bj < _PEAK_START:
         return "legacy"
-    h = bj.hour
-    if (9 <= h < 12) or (14 <= h < 18):
+    key = (model or "").split("[")[0]
+    if key in _BAILIAN_MODELS:
+        # 百炼：高峰 8:00–22:00，空闲 22:00–8:00
+        if 8 <= bj.hour < 22:
+            return "peak"
+        return "offpeak"
+    # 周末（周六=5/周日=6）自 8-23 起全天低谷
+    if bj >= _WEEKEND_START and bj.weekday() >= 5:
+        return "offpeak"
+    # DeepSeek 官方：高峰 9:00–12:00、14:00–18:00
+    if (9 <= bj.hour < 12) or (14 <= bj.hour < 18):
         return "peak"
     return "offpeak"
 
@@ -145,7 +159,7 @@ def get_cumulative_usage(transcript_path):
                     m = rec.get("message") or {}
                     u = m.get("usage") or {}
                     model = str(m.get("model") or "unknown")
-                    bucket = classify_bucket(rec.get("timestamp"))
+                    bucket = classify_bucket(rec.get("timestamp"), model)
                     e = usage.get(model)
                     if not isinstance(e, dict) or not any(b in e for b in BUCKETS):
                         e = usage[model] = {b: _zero_usage() for b in BUCKETS}
@@ -339,6 +353,10 @@ PROVIDER_COLOR = {
     "moonshot": "\033[0;35m",   # 紫
     "minimax":  "\033[0;32m",   # 绿
     "zhipu":    "\033[0;32m",   # 绿
+    "qwen":     "\033[0;35m",   # 紫
+    "tencent":  "\033[1;36m",   # 亮青
+    "hunyuan":  "\033[1;36m",   # 亮青
+    "google":   "\033[1;34m",   # 亮蓝
     "openai":   "\033[0;37m",   # 白
     "xai":      "\033[1;33m",   # 琥珀
     "anthropic": "\033[0;34m",  # 蓝
