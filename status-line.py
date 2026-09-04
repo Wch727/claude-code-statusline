@@ -138,13 +138,18 @@ def classify_segment(ts, model, input_tokens, prices):
         return "long" if (input_tokens or 0) > entry.get("long_threshold", 0) else "short"
     return "flat"
 
-def get_cumulative_usage(transcript_path, prices=None):
+def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_duration_ms=0):
     """增量累计每模型的 token 用量（按会话隔离 + 按计费分段，只处理新增行）。
 
     缓存结构：``{ "_version": 5, transcript_path: {"offset": int, "usage": {model: {segment: {…}}}} }``。
     segment ∈ {legacy,peak,offpeak}（峰谷）或 {short,long}（长上下文）或 {flat}（扁平），
     每个 segment 记录 input/output/cache_read/cache_write。
     旧格式缓存通过 ``_version`` 判定后自动作废重算。
+
+    同时跨 resume 累计活跃时长：Claude Code 的 total_duration_ms / total_api_duration_ms
+    在 /resume 后会重置，这里检测到值回退（cur < last）时把上一段时长并入 base，
+    使时长单调累计，不会因 resume 而丢失之前工作的时间。
+    返回 ``(usage, total_duration_ms, total_api_duration_ms)``。
     """
     if prices is None:
         prices = load_prices()
@@ -162,6 +167,19 @@ def get_cumulative_usage(transcript_path, prices=None):
     usage = session["usage"]
     if not isinstance(usage, dict):
         usage = session["usage"] = {}
+    # ── 跨 resume 累计活跃时长 ──
+    def _acc(field, cur):
+        base_key = "dur_base" if field == "duration" else "api_base"
+        last_key = "dur_last" if field == "duration" else "api_last"
+        base = session.get(base_key, 0)
+        last = session.get(last_key, 0)
+        if cur < last:  # resume 重置：把上一段时长并入 base
+            base += last
+        session[base_key] = base
+        session[last_key] = cur
+        return base + cur
+    total_duration = _acc("duration", duration_ms or 0)
+    total_api = _acc("api", api_duration_ms or 0)
     try:
         with open(transcript_path, "r", encoding="utf-8") as f:
             f.seek(int(session.get("offset", 0)))
@@ -199,7 +217,7 @@ def get_cumulative_usage(transcript_path, prices=None):
             json.dump(cache, f)
     except Exception:
         pass
-    return usage
+    return usage, total_duration, total_api
 
 def _segment_rate(entry, seg):
     """返回指定分段的单价子表。
@@ -324,13 +342,18 @@ except (json.JSONDecodeError, TypeError):
 
 # ── 字段 ──────────────────────────────────────────────
 model = data.get("model", {})
-model_id = model.get("id") or model.get("display_name") or "?"
-model_name = model.get("display_name") or model_id
+# 兼容两种格式：dict（{id, display_name}）或纯字符串（视觉模型等别名模型）。
+if isinstance(model, str):
+    model_id = model
+    model_name = model
+else:
+    model_id = model.get("id") or model.get("display_name") or "?"
+    model_name = model.get("display_name") or model_id
 if isinstance(model_name, str) and "/" in model_name:
     model_name = model_name.split("/")[-1]
 import re as _re2
 model_name = _re2.sub(r"\[\w+\]", "", model_name)  # 去掉 [1M]/[1m] 后缀
-provider = model.get("provider") or model.get("vendor") or model.get("supplier") or "?"
+provider = model.get("provider") or model.get("vendor") or model.get("supplier") or "?" if isinstance(model, dict) else "?"
 
 # Token 使用（真实字段在 context_window.current_usage）
 ctx = data.get("context_window") or {}
@@ -360,7 +383,8 @@ _cum_usd = None
 _cum_cny = None
 _cum_detail = {}
 if _transcript and os.path.exists(_transcript):
-    _cum_usage = get_cumulative_usage(_transcript, _prices)
+    _cum_usage, duration, api_duration = get_cumulative_usage(
+        _transcript, _prices, duration, api_duration)
     _cum_usd, _cum_cny, _cum_detail = cumulative_cost(_cum_usage, _prices)
 # transcript 不可读时退回 Claude Code 的 total_cost_usd（仅当有 USD 模型）。
 _cost_usd_total = _cum_usd if _cum_usd is not None else float(cost_obj.get("total_cost_usd") or 0) or None
