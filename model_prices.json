@@ -1,5 +1,15 @@
 {
-  "_comment": "每 1M token 单价。currency=CNY 的模型（deepseek 等 .cn 国产模型）价格以人民币原生计费，直接显示 ¥；其余为美元（$），显示时按实时汇率换算 ¥。deepseek .cn 价格源：DeepSeek 开放平台。2026-08-17 00:00（北京）起 deepseek-v4 改峰谷定价：legacy=旧固定价(<8-17)，peak=高峰(北京 9:00-12:00、14:00-18:00)，offpeak=空闲(其余，=高峰价一半)。2026-08-23 00:00（北京）起周末（周六/周日）全天按 offpeak 低谷价计费。改价格后 status line 自动生效。查单价：python ~/.claude/status-line.py --prices。",
+  "_comment": "每 1M token 单价。currency=CNY 的模型（deepseek 等 .cn 国产模型）价格以人民币原生计费，直接显示 ¥；其余为美元（$），显示时按实时汇率换算 ¥。deepseek .cn 价格源：DeepSeek 开放平台。2026-08-17 00:00（北京）起 deepseek-v4 改峰谷定价：legacy=旧固定价(<8-17)，peak=高峰(北京 9:00-12:00、14:00-18:00)，offpeak=空闲(其余，=高峰价一半)。2026-08-23 00:00（北京）起周末（周六/周日）全天按 offpeak 低谷价计费。2026-09-10 12:00（北京）起 Flash 系列降价，同时模型更名为 deepseek-flash（DeepSeek-V4.1-Flash）；旧名 deepseek-v4-flash / -vision-exp 已停用，历史用量仍按旧价（peak 3/0.1/9、offpeak 1.5/0.05/4.5），新名 deepseek-flash 按新价（peak 2/0.04/8、offpeak 1/0.02/4）。deepseek-v4-pro 将于 2026-09-14 12:00 下线并路由至 V4.1 Flash 计费，届时需更新此表。改价格后 status line 自动生效。查单价：python ~/.claude/status-line.py --prices。",
+  "deepseek-flash": {
+    "provider": "deepseek", "currency": "CNY",
+    "peak":    { "input": 2.0, "cache_read": 0.04, "cache_write": 2.0, "output": 8.0 },
+    "offpeak": { "input": 1.0, "cache_read": 0.02, "cache_write": 1.0, "output": 4.0 }
+  },
+  "deepseek-v4.1-flash-expires-on-0910": {
+    "provider": "deepseek", "currency": "CNY",
+    "peak":    { "input": 2.0, "cache_read": 0.04, "cache_write": 2.0, "output": 8.0 },
+    "offpeak": { "input": 1.0, "cache_read": 0.02, "cache_write": 1.0, "output": 4.0 }
+  },
   "deepseek-v4-flash": {
     "provider": "deepseek", "currency": "CNY",
     "legacy":  { "input": 1.0, "cache_read": 0.02, "cache_write": 1.0, "output": 2.0 },
