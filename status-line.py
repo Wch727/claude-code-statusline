@@ -431,6 +431,25 @@ def provider_color(model):
 _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
 parts = [f"{provider_color(_lookup_key)}[{_model_tag}]{NC}"]
 
+# 推理强度 effort：模型不支持该参数时字段缺席（data.effort 不存在）。
+# 强度越高思考 token 越多、越贵，故按 low→max 由淡转红着色。
+_effort_raw = data.get("effort")
+if isinstance(_effort_raw, dict):
+    _effort = _effort_raw.get("level")          # 官方字段：effort.level
+elif isinstance(_effort_raw, str):
+    _effort = _effort_raw                       # 兼容直接给字符串的情况
+else:
+    _effort = None
+if _effort:
+    _EFFORT_COLOR = {
+        "low":    DIM,       # 淡：最省
+        "medium": GREEN,     # 绿
+        "high":   CYAN,      # 青（默认档，中性）
+        "xhigh":  YELLOW,    # 黄：偏贵
+        "max":    RED,       # 红：最贵
+    }
+    parts.append(f"{dim('effort')} {_EFFORT_COLOR.get(_effort, GRAY)}{_effort}{NC}")
+
 # Token：输入 / 输出（文字标签 + 彩色数值，遵循 AI CLI 惯例）
 in_str = f"{GREEN}{fmt(inp)}{NC}"
 out_str = f"{MAGENTA}{fmt(out)}{NC}"
