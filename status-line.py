@@ -432,23 +432,30 @@ _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
 parts = [f"{provider_color(_lookup_key)}[{_model_tag}]{NC}"]
 
 # 推理强度 effort：模型不支持该参数时字段缺席（data.effort 不存在）。
-# 强度越高思考 token 越多、越贵，故按 low→max 由淡转红着色。
+# 强度越高思考 token 越多、越贵，故按 low→ultracode 由淡转浓着色。
 _effort_raw = data.get("effort")
 if isinstance(_effort_raw, dict):
     _effort = _effort_raw.get("level")          # 官方字段：effort.level
-elif isinstance(_effort_raw, str):
-    _effort = _effort_raw                       # 兼容直接给字符串的情况
+elif isinstance(_effort_raw, (str, int)):
+    _effort = _effort_raw                       # 兼容直接给字符串/数字（子代理可为 token 预算）
 else:
     _effort = None
-if _effort:
-    _EFFORT_COLOR = {
-        "low":    DIM,       # 淡：最省
-        "medium": GREEN,     # 绿
-        "high":   CYAN,      # 青（默认档，中性）
-        "xhigh":  YELLOW,    # 黄：偏贵
-        "max":    RED,       # 红：最贵
-    }
-    parts.append(f"{dim('effort')} {_EFFORT_COLOR.get(_effort, GRAY)}{_effort}{NC}")
+
+# 全量档位：low < medium < high < xhigh < max，外加 Claude Code 特有的 ultracode
+# （= xhigh 推理 + 自动多智能体编排）与 auto（跟随模型默认，仅 /effort 参数）。
+_EFFORT_COLOR = {
+    "low":       DIM,       # 淡：最省，简单任务
+    "medium":    GREEN,     # 绿：平衡
+    "high":      CYAN,      # 青：多数模型默认
+    "xhigh":     YELLOW,    # 黄：更深推理（Opus 4.7 默认）
+    "max":       RED,       # 红：最高，不限思考 token（仅限会话）
+    "ultracode": MAGENTA,   # 紫：xhigh + 多智能体编排（仅限会话）
+    "auto":      GRAY,      # 灰：跟随模型默认
+}
+# 数字档位（子代理的 token 预算）显示为 int
+_effort_label = str(int(_effort)) if isinstance(_effort, int) else str(_effort or "")
+if _effort_label:
+    parts.append(f"{dim('effort')} {_EFFORT_COLOR.get(_effort_label, GRAY)}{_effort_label}{NC}")
 
 # Token：输入 / 输出（文字标签 + 彩色数值，遵循 AI CLI 惯例）
 in_str = f"{GREEN}{fmt(inp)}{NC}"

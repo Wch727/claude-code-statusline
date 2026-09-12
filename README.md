@@ -39,7 +39,7 @@ cp model_prices.json ~/.claude/
 ## Features
 
 - **Model + provider**: `[model@provider]`, colored per provider
-- **Effort**: current reasoning effort (`low`/`medium`/`high`/`xhigh`/`max`), color-graded by cost (dim → green → cyan → yellow → red); hidden when the model doesn't support the effort parameter
+- **Effort**: current reasoning effort — all levels covered (`low`/`medium`/`high`/`xhigh`/`max`, plus Claude Code's `ultracode` and `auto`, and numeric subagent token budgets), color-graded by cost (dim → green → cyan → yellow → red → magenta); hidden when the model doesn't support the effort parameter
 - **Tokens**: `in` / `out` / `cache read` / `cache write` (bright-white labels, readable on dark terminals)
 - **Context progress bar**: `ctx [██████░░░░░░░░] 45%`; green ≤70%, yellow 71–90%, red >90% + `⚠ X% left`
 - **Cost**: locally estimated token × unit price, `$X (¥Y)` dual currency; models missing from the DB fall back to Claude Code's `total_cost_usd`. Multi-model sessions show `total`, single-model shows the model name
@@ -120,7 +120,7 @@ cp model_prices.json ~/.claude/
 ## 功能
 
 - **模型 + 供应商**：`[model@provider]`，按供应商着色
-- **推理强度 effort**：显示当前 `low`/`medium`/`high`/`xhigh`/`max`，按花费由淡到红着色（淡→绿→青→黄→红）；模型不支持该参数时自动隐藏
+- **推理强度 effort**：全量档位 `low`/`medium`/`high`/`xhigh`/`max`，外加 Claude Code 特有的 `ultracode` 和 `auto`，数字档（子代理 token 预算）也支持；按花费由淡到浓着色（淡→绿→青→黄→红→紫）；模型不支持该参数时自动隐藏
 - **Token**：`in` / `out` / `cache read` / `cache write`（标签亮白，黑底清晰）
 - **上下文进度条**：`ctx [██████░░░░░░░░] 45%`，≤70% 绿、71–90% 黄、>90% 红 + `⚠ X% left`
 - **花费**：按 token × 单价本地估算，`$X (¥Y)` 双币显示；库里没有的模型退回 Claude Code 的 `total_cost_usd`。多模型会话标 `total`，单模型标模型名
