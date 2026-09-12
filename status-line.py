@@ -465,21 +465,24 @@ if cache_write:
 if cache_strs:
     parts.append(f"{dim('cache')} {CYAN}{','.join(cache_strs)}{NC}")
 
+# ── 第二行：上下文进度条 / 输出速率（第一行只留模型与 token，避免过长）──
+parts_ctx = []
+
 # 上下文进度条（≤70% 绿、71–90% 黄、>90% 红 + ⚠ 剩余）
 if ctx_size:
     if used_pct is not None:
         pct_val = used_pct
         bar_str = bar(pct_val)
         if pct_val > 90:
-            parts.append(f"{RED}ctx {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ {remaining_pct}% left{NC}")
+            parts_ctx.append(f"{RED}ctx {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ {remaining_pct}% left{NC}")
         elif pct_val > 70:
-            parts.append(f"{YELLOW}ctx {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ {remaining_pct}% left{NC}")
+            parts_ctx.append(f"{YELLOW}ctx {fmt(ctx_size)} [{bar_str}] {pct_val}% ⚠ {remaining_pct}% left{NC}")
         else:
-            parts.append(f"{GREEN}ctx {fmt(ctx_size)} [{bar_str}] {pct_val}%{NC}")
+            parts_ctx.append(f"{GREEN}ctx {fmt(ctx_size)} [{bar_str}] {pct_val}%{NC}")
     else:
-        parts.append(f"{DIM}ctx {fmt(ctx_size)}{NC}")
+        parts_ctx.append(f"{DIM}ctx {fmt(ctx_size)}{NC}")
 
-# ── 第二行：花费 / 消息 / 目录 / 分支 / 时长 / 时钟 ──────
+# ── 第三行：花费 / 消息 / 目录 / 分支 / 时长 / 时钟 ──────
 parts2 = []
 
 # 会话花费：跨模型时标"总计"，单模型才标模型名。
@@ -527,13 +530,13 @@ _weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _now = datetime.now()
 parts2.append(f"🕐 {BLUE}{_now.strftime('%Y-%m-%d %H:%M:%S')} {_weekdays[_now.weekday()]}{NC}")
 
-# 输出速率（累计输出 token / 活跃 API 时长秒）放第一行
+# 输出速率（累计输出 token / 活跃 API 时长秒）—— 与 ctx 同行，放第二行
 _gen_time = (api_duration or duration) / 1000.0
 _tot_out = sum(_usage_total(u, "output") for u in _cum_usage.values())
 if _gen_time > 0 and _tot_out > 0:
-    parts.append(f"{dim('rate')} {CYAN}{_tot_out/_gen_time:.0f} token/s{NC}")
+    parts_ctx.append(f"{dim('rate')} {CYAN}{_tot_out/_gen_time:.0f} token/s{NC}")
 
-# 第三行起：每个模型两行——一行 token，一行花费
+# 第四行起：每个模型两行——一行 token，一行花费
 parts3 = []
 if _cum_detail:
     for model, d in sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]):
@@ -568,4 +571,9 @@ else:
     if cache_read:
         parts3.append(f"{dim('cache read')} {fmt(cache_read)}")
 
-print(SEP.join(parts) + "\n" + SEP.join(parts2) + "\n" + "\n".join(parts3))
+_lines = [SEP.join(parts)]                 # 1) 模型 / effort / token
+if parts_ctx:                              # 2) ctx 进度条 / 输出速率（无则整行省略）
+    _lines.append(SEP.join(parts_ctx))
+_lines.append(SEP.join(parts2))            # 3) 花费 / 消息 / 目录 / 分支 / 时长 / 时钟
+_lines.append("\n".join(parts3))           # 4+) 各模型 token 与花费明细
+print("\n".join(_lines))

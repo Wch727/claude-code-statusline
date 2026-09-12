@@ -5,7 +5,8 @@ A custom terminal status bar for [Claude Code](https://claude.com/claude-code): 
 ## Preview
 
 ```
-[deepseek-v4-flash@deepseek] · in 1.0M · out 500.0K · cache read 2.0M, write 200 · ctx 1.0M [██████░░░░░░░░] 45% · rate 3714 token/s
+[deepseek-flash@deepseek] · effort xhigh · in 1.0M · out 500.0K · cache read 2.0M, write 200
+ctx 1.0M [██████░░░░░░░░] 45% · rate 3714 token/s
 💰 total $4.787 (¥32.37) · 💱 1$=6.76¥ · 💬 42 · 📁 Kaggriculture · 🌿 main · ⏱ 0h14m · 🕐 2026-08-07 16:39:28 Fri
 deepseek-v4-flash · in 3.4M  out 2.2M  cache read 931.2M
     cost $3.703/¥25.04  (in $0.478/¥3.23  out $0.618/¥4.18  cache read $2.607/¥17.63)
@@ -46,7 +47,7 @@ cp model_prices.json ~/.claude/
 - **Live FX rate**: `💱 1$=¥6.76`, real-time with 1h cache (fallback 7.2)
 - **Per-model cost detail**: each model gets two lines — a token line + a money line (`cost $/¥`, with `in`/`out`/`cache read`/`cache write` sub-costs, each in `$/¥`)
 - **Message count / directory / git branch / session duration / clock** (Y-M-D time weekday)
-- **Output rate**: `rate` = cumulative output tokens / active API seconds, on line 1
+- **Output rate**: `rate` = cumulative output tokens / active API seconds, on line 2 next to the context bar
 
 ## Prices
 
@@ -85,7 +86,8 @@ MIT
 ## 效果
 
 ```
-[deepseek-v4-flash@deepseek] · in 1.0M · out 500.0K · cache read 2.0M, write 200 · ctx 1.0M [██████░░░░░░░░] 45% · rate 3714 token/s
+[deepseek-flash@deepseek] · effort xhigh · in 1.0M · out 500.0K · cache read 2.0M, write 200
+ctx 1.0M [██████░░░░░░░░] 45% · rate 3714 token/s
 💰 total $4.787 (¥32.37) · 💱 1$=6.76¥ · 💬 42 · 📁 Kaggriculture · 🌿 main · ⏱ 0h14m · 🕐 2026-08-07 16:39:28 Fri
 deepseek-v4-flash · in 3.4M  out 2.2M  cache read 931.2M
     cost $3.703/¥25.04  (in $0.478/¥3.23  out $0.618/¥4.18  cache read $2.607/¥17.63)
@@ -126,7 +128,7 @@ cp model_prices.json ~/.claude/
 - **实时汇率**：`💱 1$=¥6.76`，缓存 1 小时，失败回退 7.2
 - **花费明细**：每个模型独立两行——token 行 + 金额行（`cost $/¥` 括号内再分 `in`/`out`/`cache read`/`cache write`，每项都带 `$/¥`）
 - **消息数 / 目录 / git 分支 / 会话时长 / 时钟**（年-月-日 时间 星期）
-- **输出速率**：`rate` 累计输出 token / 活跃 API 秒，放第一行
+- **输出速率**：`rate` 累计输出 token / 活跃 API 秒，放第二行与上下文进度条同行
 
 ## 查单价（价格库）
 
