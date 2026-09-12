@@ -47,7 +47,8 @@ cp model_prices.json ~/.claude/
 - **Live FX rate**: `💱 1$=¥6.76` — real-time from Sina finance (on-shore USD/CNY), 30min cache, falls back to ExchangeRate-API. Note the on-shore CNY market is closed nights/weekends, so the rate legitimately holds still then
 - **Per-model cost detail**: each model gets two lines — a token line + a money line (`cost $/¥`, with `in`/`out`/`cache read`/`cache write` sub-costs, each in `$/¥`)
 - **Message count / directory / git branch / session duration / clock** (Y-M-D time weekday)
-- **Native Claude Code fields** (each shown only when present): session name on line 1, prompt-cache hit ratio + TTL, worktree, PR + review state, subagent, fast mode, vim mode, output style, 5h/7d rate-limit windows
+- **Native Claude Code fields** (each shown only when present): prompt-cache hit ratio + TTL, worktree, PR + review state, subagent, fast mode, vim mode, output style, 5h/7d rate-limit windows
+- **Session name** on line 1 — only when you set it yourself with `/rename` (or `--name`). AI-generated titles are ignored because they often mis-summarise what actually happened
 - **Output rate**: `rate` = cumulative output tokens / active API seconds, on line 2 next to the context bar
 
 ## Prices
@@ -129,7 +130,8 @@ cp model_prices.json ~/.claude/
 - **实时汇率**：`💱 1$=¥6.76`，取自新浪财经在岸美元人民币实时价，缓存 30 分钟，失败回退 ExchangeRate-API。注意在岸人民币夜间/周末休市，此时汇率本就几乎不动
 - **花费明细**：每个模型独立两行——token 行 + 金额行（`cost $/¥` 括号内再分 `in`/`out`/`cache read`/`cache write`，每项都带 `$/¥`）
 - **消息数 / 目录 / git 分支 / 会话时长 / 时钟**（年-月-日 时间 星期）
-- **Claude Code 原生字段**（均在存在时才显示）：会话名（第一行）、提示缓存命中率+TTL、worktree、PR+审查状态、子代理、快速模式、vim 模式、输出风格、5h/7d 速率限制窗口
+- **Claude Code 原生字段**（均在存在时才显示）：提示缓存命中率+TTL、worktree、PR+审查状态、子代理、快速模式、vim 模式、输出风格、5h/7d 速率限制窗口
+- **会话名**（第一行）：仅在你用 `/rename`（或 `--name`）手动命名时显示；AI 自动生成的标题常概括不准，故忽略不显示
 - **输出速率**：`rate` 累计输出 token / 活跃 API 秒，放第二行与上下文进度条同行
 
 ## 查单价（价格库）

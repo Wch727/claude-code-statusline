@@ -108,7 +108,7 @@ def fmt_price(x):
 
 # ── 累计用量（增量读 transcript，避免每秒全量解析）────────
 USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
-CACHE_VERSION = 5  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
+CACHE_VERSION = 6  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
 BUCKETS = ("legacy", "peak", "offpeak")
 _CN_TZ = timezone(timedelta(hours=8))
 _PEAK_START = datetime(2026, 8, 17, 0, 0, 0, tzinfo=_CN_TZ)  # 峰谷定价生效时刻（北京）
@@ -179,7 +179,12 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
     同时跨 resume 累计活跃时长：Claude Code 的 total_duration_ms / total_api_duration_ms
     在 /resume 后会重置，这里检测到值回退（cur < last）时把上一段时长并入 base，
     使时长单调累计，不会因 resume 而丢失之前工作的时间。
-    返回 ``(usage, total_duration_ms, total_api_duration_ms)``。
+
+    另外捕获**手动命名**的会话名：transcript 里 ``custom-title`` 记录来自 /rename
+    或 --name（可靠），而 ``ai-title`` 是 AI 自动生成的标题（常概括不准），
+    因此只认前者、忽略后者。
+
+    返回 ``(usage, total_duration_ms, total_api_duration_ms, custom_title)``。
     """
     if prices is None:
         prices = load_prices()
@@ -221,6 +226,12 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
                     rec = json.loads(line)
                 except Exception:
                     continue
+                if rec.get("type") == "custom-title":
+                    # 仅认手动命名（/rename、--name）；ai-title 是自动生成的，忽略
+                    _ct = rec.get("customTitle")
+                    if _ct:
+                        session["custom_title"] = str(_ct)
+                    continue
                 if rec.get("type") == "assistant":
                     m = rec.get("message") or {}
                     u = m.get("usage") or {}
@@ -247,7 +258,7 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
             json.dump(cache, f)
     except Exception:
         pass
-    return usage, total_duration, total_api
+    return usage, total_duration, total_api, session.get("custom_title")
 
 def _segment_rate(entry, seg):
     """返回指定分段的单价子表。
@@ -412,8 +423,9 @@ _cum_usage = {}
 _cum_usd = None
 _cum_cny = None
 _cum_detail = {}
+_custom_title = None   # 仅手动命名的会话名（/rename），AI 自动标题不采用
 if _transcript and os.path.exists(_transcript):
-    _cum_usage, duration, api_duration = get_cumulative_usage(
+    _cum_usage, duration, api_duration, _custom_title = get_cumulative_usage(
         _transcript, _prices, duration, api_duration)
     _cum_usd, _cum_cny, _cum_detail = cumulative_cost(_cum_usage, _prices)
 # transcript 不可读时退回 Claude Code 的 total_cost_usd（仅当有 USD 模型）。
@@ -461,9 +473,10 @@ def provider_color(model):
 _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
 parts = [f"{provider_color(_lookup_key)}[{_model_tag}]{NC}"]
 
-# 会话名（原生 session_name：/rename 或 AI 生成的标题）—— 放在第一行做标识
-if data.get("session_name"):
-    parts.append(f"🏷 {MAGENTA}{data['session_name']}{NC}")
+# 会话名——仅手动命名的（/rename、--name）才显示，放第一行做标识。
+# AI 自动生成的标题常概括不准，故不采用（那份存在 transcript 的 ai-title 里）。
+if _custom_title:
+    parts.append(f"🏷 {MAGENTA}{_custom_title}{NC}")
 
 # 推理强度 effort：模型不支持该参数时字段缺席（data.effort 不存在）。
 # 强度越高思考 token 越多、越贵，故按 low→ultracode 由淡转浓着色。
