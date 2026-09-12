@@ -44,9 +44,10 @@ cp model_prices.json ~/.claude/
 - **Context progress bar**: `ctx [██████░░░░░░░░] 45%`; green ≤70%, yellow 71–90%, red >90% + `⚠ X% left`
 - **Cost**: locally estimated token × unit price, `$X (¥Y)` dual currency; models missing from the DB fall back to Claude Code's `total_cost_usd`. Multi-model sessions show `total`, single-model shows the model name
 - **Native currency**: `currency: "CNY"` models (DeepSeek & other .cn domestic models) are billed in **¥ directly** from their RMB unit prices — no `$→¥` conversion. USD models show `$ + ¥`. Mixed sessions show `$… + ¥…`
-- **Live FX rate**: `💱 1$=¥6.76`, real-time with 1h cache (fallback 7.2)
+- **Live FX rate**: `💱 1$=¥6.76` — real-time from Sina finance (on-shore USD/CNY), 30min cache, falls back to ExchangeRate-API. Note the on-shore CNY market is closed nights/weekends, so the rate legitimately holds still then
 - **Per-model cost detail**: each model gets two lines — a token line + a money line (`cost $/¥`, with `in`/`out`/`cache read`/`cache write` sub-costs, each in `$/¥`)
 - **Message count / directory / git branch / session duration / clock** (Y-M-D time weekday)
+- **Native Claude Code fields** (each shown only when present): session name on line 1, prompt-cache hit ratio + TTL, worktree, PR + review state, subagent, fast mode, vim mode, output style, 5h/7d rate-limit windows
 - **Output rate**: `rate` = cumulative output tokens / active API seconds, on line 2 next to the context bar
 
 ## Prices
@@ -125,9 +126,10 @@ cp model_prices.json ~/.claude/
 - **上下文进度条**：`ctx [██████░░░░░░░░] 45%`，≤70% 绿、71–90% 黄、>90% 红 + `⚠ X% left`
 - **花费**：按 token × 单价本地估算，`$X (¥Y)` 双币显示；库里没有的模型退回 Claude Code 的 `total_cost_usd`。多模型会话标 `total`，单模型标模型名
 - **本币计费**：`currency: "CNY"` 的模型（deepseek 等 .cn 国产模型）按人民币单价**原生显示 ¥**，不做美元换算；USD 模型显示 `$ + ¥`；混合会话显示 `$… + ¥…`
-- **实时汇率**：`💱 1$=¥6.76`，缓存 1 小时，失败回退 7.2
+- **实时汇率**：`💱 1$=¥6.76`，取自新浪财经在岸美元人民币实时价，缓存 30 分钟，失败回退 ExchangeRate-API。注意在岸人民币夜间/周末休市，此时汇率本就几乎不动
 - **花费明细**：每个模型独立两行——token 行 + 金额行（`cost $/¥` 括号内再分 `in`/`out`/`cache read`/`cache write`，每项都带 `$/¥`）
 - **消息数 / 目录 / git 分支 / 会话时长 / 时钟**（年-月-日 时间 星期）
+- **Claude Code 原生字段**（均在存在时才显示）：会话名（第一行）、提示缓存命中率+TTL、worktree、PR+审查状态、子代理、快速模式、vim 模式、输出风格、5h/7d 速率限制窗口
 - **输出速率**：`rate` 累计输出 token / 活跃 API 秒，放第二行与上下文进度条同行
 
 ## 查单价（价格库）

@@ -35,7 +35,7 @@ def bar(pct, width=14):
 # ── 价格库 / 汇率 ─────────────────────────────────────
 PRICE_DB = os.path.expanduser("~/.claude/model_prices.json")
 USD_CNY_CACHE = os.path.expanduser("~/.claude/usd_cny.json")
-USD_CNY_TTL = 3600  # 汇率缓存 1 小时
+USD_CNY_TTL = 1800  # 汇率缓存 30 分钟（新浪实时源，日内可见变动）
 
 def load_prices():
     try:
@@ -44,8 +44,36 @@ def load_prices():
     except Exception:
         return {}
 
+def _fetch_sina_fx():
+    """新浪财经外汇实时价（在岸美元人民币），失败抛异常。
+
+    返回 ``var hq_str_fx_susdcny="时间,昨收,…×5,最新价,…";``，取 index 8。
+    字段含义用离岸 CNH 的涨跌字段交叉验证过：涨跌额/昨收 == 涨跌幅
+    （-0.0074 / 6.7145 == -0.11%），确认 index 8 为最新价。
+    """
+    import urllib.request
+    req = urllib.request.Request(
+        "https://hq.sinajs.cn/list=fx_susdcny",
+        headers={"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=4) as r:
+        txt = r.read().decode("gbk", "replace")
+    rate = float(txt.split('"')[1].split(",")[8])
+    if not (4.0 < rate < 10.0):          # 合理性护栏：字段错位时不采纳
+        raise ValueError(f"sina fx out of range: {rate}")
+    return rate
+
+def _fetch_er_api():
+    """ExchangeRate-API 免费开放端点（每日更新，作为兜底）。"""
+    import urllib.request
+    with urllib.request.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as r:
+        return float(json.loads(r.read().decode())["rates"]["CNY"])
+
 def get_usd_cny():
-    """实时 USD→CNY 汇率（缓存 1 小时，失败回退 7.2）。"""
+    """实时 USD→CNY 汇率（缓存 30 分钟）。
+
+    数据源按可靠性依次回退：新浪实时 → ExchangeRate-API（日更）→ 本地缓存 → 7.2。
+    注意：在岸人民币周末/夜间休市，此时汇率本就几乎不动，并非未刷新。
+    """
     import time as _t
     try:
         if os.path.exists(USD_CNY_CACHE):
@@ -55,23 +83,25 @@ def get_usd_cny():
                 return c["rate"]
     except Exception:
         pass
-    try:
-        import urllib.request
-        with urllib.request.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as r:
-            d = json.loads(r.read().decode())
-        rate = float(d["rates"]["CNY"])
+    rate = None
+    for _fetch in (_fetch_sina_fx, _fetch_er_api):
         try:
-            with open(USD_CNY_CACHE, "w", encoding="utf-8") as f:
-                json.dump({"ts": _t.time(), "rate": rate}, f)
+            rate = _fetch()
+            break
         except Exception:
-            pass
-        return rate
-    except Exception:
+            continue
+    if rate is None:                     # 全部失败：回退到旧缓存，最后 7.2
         try:
             with open(USD_CNY_CACHE, encoding="utf-8") as f:
                 return json.load(f).get("rate", 7.2)
         except Exception:
             return 7.2
+    try:
+        with open(USD_CNY_CACHE, "w", encoding="utf-8") as f:
+            json.dump({"ts": _t.time(), "rate": rate}, f)
+    except Exception:
+        pass
+    return rate
 
 def fmt_price(x):
     return f"{x:.5f}".rstrip("0").rstrip(".")
@@ -431,6 +461,10 @@ def provider_color(model):
 _model_tag = model_name if provider in ("?", "") else f"{model_name}@{provider}"
 parts = [f"{provider_color(_lookup_key)}[{_model_tag}]{NC}"]
 
+# 会话名（原生 session_name：/rename 或 AI 生成的标题）—— 放在第一行做标识
+if data.get("session_name"):
+    parts.append(f"🏷 {MAGENTA}{data['session_name']}{NC}")
+
 # 推理强度 effort：模型不支持该参数时字段缺席（data.effort 不存在）。
 # 强度越高思考 token 越多、越贵，故按 low→ultracode 由淡转浓着色。
 _effort_raw = data.get("effort")
@@ -489,6 +523,19 @@ if ctx_size:
     else:
         parts_ctx.append(f"{DIM}ctx {fmt(ctx_size)}{NC}")
 
+# 提示缓存状态（原生 prompt_cache）：命中率 + 剩余 TTL；冷缓存标 ❄。
+# 命中率直接决定输入成本，故 ≥80% 绿、≥50% 黄、更低红。
+_pc = data.get("prompt_cache") or {}
+if _pc.get("hit_ratio") is not None:
+    _hr = float(_pc["hit_ratio"]) * 100
+    _hr_color = GREEN if _hr >= 80 else (YELLOW if _hr >= 50 else RED)
+    _pc_str = f"{_hr_color}{_hr:.0f}%{NC}"
+    if not _pc.get("warm", True):
+        _pc_str = f"{DIM}❄{NC} " + _pc_str
+    if _pc.get("ttl"):
+        _pc_str += f" {DIM}{_pc['ttl']}{NC}"
+    parts_ctx.append(f"{dim('cache hit')} {_pc_str}")
+
 # ── 第三行：花费 / 消息 / 目录 / 分支 / 时长 / 时钟 ──────
 parts2 = []
 
@@ -527,10 +574,50 @@ if cwd:
     except Exception:
         pass
 
+# worktree（原生 worktree.name：仅在 worktree 会话中出现）
+_wt = (data.get("worktree") or {}).get("name")
+if _wt:
+    parts2.append(f"🌳 {GREEN}{_wt}{NC}")
+
+# PR（原生 pr.number / review_state：仅在当前分支有打开的 PR 时出现）
+_pr = data.get("pr") or {}
+if _pr.get("number"):
+    _pr_s = f"🔀 {BLUE}#{_pr['number']}{NC}"
+    if _pr.get("review_state"):
+        _pr_s += f" {DIM}{_pr['review_state']}{NC}"
+    parts2.append(_pr_s)
+
+# 子代理（原生 agent.name：--agent 或配置了 agent 时出现）
+_agent = (data.get("agent") or {}).get("name")
+if _agent:
+    parts2.append(f"🤖 {CYAN}{_agent}{NC}")
+
 # 时长
 ds = fmt_duration(duration)
 if ds:
     parts2.append(f"⏱ {ds}")
+
+# 会话开关（原生字段，仅开启/非默认时显示，避免常态噪音）
+_switches = []
+if data.get("fast_mode"):
+    _switches.append(f"{YELLOW}⚡fast{NC}")          # 快速模式：约 2x 价格
+_vim = (data.get("vim") or {}).get("mode")           # vim 模式才出现
+if _vim:
+    _switches.append(f"{YELLOW}⌨{_vim}{NC}")
+_ostyle = (data.get("output_style") or {}).get("name")
+if _ostyle and _ostyle != "default":
+    _switches.append(f"{MAGENTA}🎨{_ostyle}{NC}")
+if _switches:
+    parts2.append(" ".join(_switches))
+
+# 速率限制窗口（原生 rate_limits：Claude.ai 订阅者首次响应后才有）
+_rl = data.get("rate_limits") or {}
+for _rl_label, _rl_key in (("5h", "five_hour"), ("7d", "seven_day")):
+    _w = _rl.get(_rl_key) or {}
+    if _w.get("used_percentage") is not None:
+        _w_pct = float(_w["used_percentage"])
+        _w_color = GREEN if _w_pct < 60 else (YELLOW if _w_pct < 85 else RED)
+        parts2.append(f"⏳{_rl_label} {_w_color}{_w_pct:.0f}%{NC}")
 
 # 时钟（年-月-日 + 时间 + 星期）
 _weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
