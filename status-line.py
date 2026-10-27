@@ -108,11 +108,31 @@ def fmt_price(x):
 
 # ── 累计用量（增量读 transcript，避免每秒全量解析）────────
 USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
-CACHE_VERSION = 6  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算
+CACHE_VERSION = 7  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算（7：峰谷规则加入法定节假日）
 BUCKETS = ("legacy", "peak", "offpeak")
 _CN_TZ = timezone(timedelta(hours=8))
 _PEAK_START = datetime(2026, 8, 17, 0, 0, 0, tzinfo=_CN_TZ)  # 峰谷定价生效时刻（北京）
-_WEEKEND_START = datetime(2026, 8, 23, 0, 0, 0, tzinfo=_CN_TZ)  # 周末全天低谷生效时刻（北京）
+_WEEKEND_START = datetime(2026, 8, 23, 0, 0, 0, tzinfo=_CN_TZ)  # 周末/节假日全天低谷生效时刻（北京）
+
+def _cn_holidays_2026():
+    """2026 年中国法定节假日（国务院办公厅 2025-11-04 通知）。
+
+    只收“放假”的日期；调休上班的周六/周日不计入，仍按周末处理——
+    因为 DeepSeek 计费口径只认“周一至周五（不含法定节假日）”，
+    官方未把调休上班日算作高峰。
+    """
+    from datetime import date
+    spans = [(1, 1, 1, 3), (2, 15, 2, 23), (4, 4, 4, 6),
+             (5, 1, 5, 5), (6, 19, 6, 21), (9, 25, 9, 27), (10, 1, 10, 7)]
+    days = set()
+    for m1, d1, m2, d2 in spans:
+        cur, end = date(2026, m1, d1), date(2026, m2, d2)
+        while cur <= end:
+            days.add(cur)
+            cur += timedelta(days=1)
+    return frozenset(days)
+
+_CN_HOLIDAYS = _cn_holidays_2026()
 
 # 百炼平台模型：峰谷时段与 DeepSeek 官方不同（百炼空闲 22:00–8:00，其余高峰）
 _BAILIAN_MODELS = {"deepseek-v4-flash-0731"}
@@ -125,8 +145,8 @@ def classify_bucket(ts, model=None):
 
     - < 2026-08-17 00:00（北京）：legacy（旧固定单价）
     - 百炼平台模型（如 deepseek-v4-flash-0731）：高峰 8:00–22:00，空闲 22:00–8:00
-    - DeepSeek 官方模型：高峰 9:00–12:00、14:00–18:00，其余空闲
-    - 2026-08-23 00:00（北京）起：周末（周六/周日）全天按低谷（offpeak）计费
+    - DeepSeek 官方模型：仅工作日（周一至周五）9:00–12:00、14:00–18:00 为高峰
+    - 2026-08-23 00:00（北京）起：周末（周六/周日）与法定节假日全天按空闲（offpeak）计费
     """
     if not ts:
         return "legacy"
@@ -145,10 +165,10 @@ def classify_bucket(ts, model=None):
         if 8 <= bj.hour < 22:
             return "peak"
         return "offpeak"
-    # 周末（周六=5/周日=6）自 8-23 起全天低谷
-    if bj >= _WEEKEND_START and bj.weekday() >= 5:
+    # 周末（周六=5/周日=6）与法定节假日自 8-23 起全天低谷
+    if bj >= _WEEKEND_START and (bj.weekday() >= 5 or bj.date() in _CN_HOLIDAYS):
         return "offpeak"
-    # DeepSeek 官方：高峰 9:00–12:00、14:00–18:00
+    # DeepSeek 官方：仅工作日高峰 9:00–12:00、14:00–18:00
     if (9 <= bj.hour < 12) or (14 <= bj.hour < 18):
         return "peak"
     return "offpeak"
@@ -342,15 +362,17 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
     prices = load_prices()
     rate = get_usd_cny()
     print(f"Rate: 1 USD = {rate:.4f} CNY (live, 1h cache)\n")
-    print(f"{'model':<20} {'provider':<10} {'cur':>4} {'in':>9} {'out':>9} {'cache-read':>11}")
-    print("-" * 66)
+    names = [n for n in prices if not n.startswith("_")]
+    mw = max([len(n) for n in names] + [len("model")])
+    print(f"{'model':<{mw}} {'provider':<10} {'cur':>4} {'in':>9} {'out':>9} {'cache-read':>11}")
+    print("-" * (mw + 46))
     for name, p in prices.items():
         if name.startswith("_"):
             continue
         currency = str(p.get("currency", "USD") or "USD").upper()
         unit = "¥" if currency == "CNY" else "$"
         if any(b in p for b in BUCKETS):
-            print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4}  峰谷定价：")
+            print(f"{name:<{mw}} {p.get('provider','?'):<10} {currency:>4}  峰谷定价：")
             for bucket in ("legacy", "offpeak", "peak"):
                 r = p.get(bucket)
                 if not r:
@@ -359,7 +381,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
                       f"out {unit}{fmt_price(r.get('output',0)):>8}  "
                       f"cache-read {unit}{fmt_price(r.get('cache_read',0)):>10}")
         elif "long" in p:
-            print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4}  长上下文分档（阈值 {p.get('long_threshold',0)}）：")
+            print(f"{name:<{mw}} {p.get('provider','?'):<10} {currency:>4}  长上下文分档（阈值 {p.get('long_threshold',0)}）：")
             for seg in ("short", "long"):
                 r = p if seg == "short" else p.get("long")
                 if not r:
@@ -370,7 +392,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
         else:
             inp, out = p.get("input", 0), p.get("output", 0)
             cr = p.get("cache_read", 0)
-            print(f"{name:<20} {p.get('provider','?'):<10} {currency:>4} "
+            print(f"{name:<{mw}} {p.get('provider','?'):<10} {currency:>4} "
                   f"{unit}{fmt_price(inp):>8} {unit}{fmt_price(out):>8} {unit}{fmt_price(cr):>10}")
     sys.exit(0)
 
@@ -464,6 +486,8 @@ PROVIDER_COLOR = {
     "openai":   "\033[0;37m",   # 白
     "xai":      "\033[1;33m",   # 琥珀
     "anthropic": "\033[0;34m",  # 蓝
+    "xiaomi":   "\033[0;33m",   # 橙（小米 MiMo）
+    "stepfun":  "\033[1;35m",   # 亮紫（阶跃 Step）
 }
 def provider_color(model):
     prov = (_prices.get(model) or {}).get("provider", "")

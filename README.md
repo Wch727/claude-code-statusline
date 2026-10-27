@@ -71,7 +71,9 @@ deepseek-v4-flash   deepseek        0.14      0.28    0.0028   0.94688   1.89376
 ## Pricing notes
 
 - Price DB: `model_prices.json` (per-1M-token prices). `currency: "CNY"` entries are **¥ / 1M tokens** (e.g. DeepSeek .cn), everything else is USD — edit it and the status line picks it up automatically.
-- Covered providers: deepseek (CNY .cn) / kimi (moonshot) / minimax / glm (zhipu) / gpt (openai) / grok (xai) / claude (anthropic).
+- Covered providers: deepseek (CNY .cn) / kimi (moonshot) / minimax / glm (zhipu) / qwen / hunyuan (tencent) / mimo (xiaomi) / step (stepfun) / gpt (openai) / grok (xai) / gemini (google) / claude (anthropic).
+- **DeepSeek peak/off-peak** (verified 2026-10): peak = Mon–Fri (excluding Chinese public holidays) 09:00–12:00 & 14:00–18:00 Beijing time; everything else — including weekends and holidays — is off-peak at half the peak rate. `deepseek-flash` is now DeepSeek-V4.1-Flash-1017 (peak ¥2/¥0.04/¥8, off-peak ¥1/¥0.02/¥4); `deepseek-v4-pro` (V4-Pro-0813) is still served (peak ¥9/¥0.30/¥27, off-peak ¥4.5/¥0.15/¥13.5). Legacy names `deepseek-v4-flash` / `vision-exp` are retired but still accepted, and route to V4.1-Flash-1017 at Flash pricing.
+- **New in 2026-10**: OpenAI `gpt-6` / `gpt-6.1`, Anthropic `Fable 5.1` / `Opus 5.5` / `Sonnet 5.5` / `Haiku 5.5`, xAI `Grok 4.7` / `4.20`, Google `Gemini 4 Argon` / `3.8 Flash`, Kimi `K3.1 Pro`, MiniMax `M3.1 Flash`, `GLM-5.3-FlashX`, Qwen3.8 Max/Plus/Flash-Next, Xiaomi `MiMo V2.6`, StepFun `Step 5 Preview`, Hunyuan `Hy4 preview`. Timing notes: Gemini 4 Argon is at promo pricing through 2026-11-30 (doubles on 12-01); Kimi K2 series retires end of Dec 2026.
 - Prices are 2026 public API list prices and may change with channels/promotions — check the official pages. **To change prices, edit `model_prices.json`.**
 - FX: fetched live from `open.er-api.com`, falls back to 7.2, cached 1h (`~/.claude/usd_cny.json`).
 
@@ -154,7 +156,9 @@ deepseek-v4-flash   deepseek        0.14      0.28    0.0028   0.94688   1.89376
 ## 价格
 
 - 价格库：`model_prices.json`（每 1M token 单价）。`currency: "CNY"` 的条目是 **¥/1M tokens**（如 deepseek .cn），其余为美元——直接编辑即可生效。
-- 已收录：deepseek（CNY .cn）/ kimi (moonshot) / minimax / glm (zhipu) / gpt (openai) / grok (xai) / claude (anthropic)。
+- 已收录：deepseek（CNY .cn）/ kimi (moonshot) / minimax / glm (zhipu) / qwen / hunyuan (tencent) / mimo (xiaomi) / step (stepfun) / gpt (openai) / grok (xai) / gemini (google) / claude (anthropic)。
+- **DeepSeek 峰谷规则**（2026-10 核对）：北京时间周一至周五（不含法定节假日）9:00–12:00、14:00–18:00 为高峰，其余时段（含周末、法定节假日全天）为空闲，空闲价 = 高峰价一半。当前 `deepseek-flash` = DeepSeek-V4.1-Flash-1017（高峰 ¥2/¥0.04/¥8、空闲 ¥1/¥0.02/¥4）；`deepseek-v4-pro` = V4-Pro-0813，仍在服务（高峰 ¥9/¥0.30/¥27、空闲 ¥4.5/¥0.15/¥13.5）。旧名 `deepseek-v4-flash` / `vision-exp` 已下线但接口仍接受，请求落到 1017 并按 Flash 价计费。
+- **2026-10 上新**：OpenAI `gpt-6` / `gpt-6.1` 系列、Anthropic `Fable 5.1` / `Opus 5.5` / `Sonnet 5.5` / `Haiku 5.5`、xAI `Grok 4.7` / `4.20`、Google `Gemini 4 Argon` / `3.8 Flash`、Kimi `K3.1 Pro`、MiniMax `M3.1 Flash`、`GLM-5.3-FlashX`、Qwen3.8 Max/Plus/Flash-Next、小米 `MiMo V2.6`、阶跃 `Step 5 Preview`、混元 `Hy4 preview`。时效提醒：Gemini 4 Argon 现为促销价（至 2026-11-30，12-01 起翻倍）；Kimi K2 系列 2026-12 月底下线。
 - 价格源为 2026 年公开 API 定价，随渠道/活动变化，以官方为准——**改价格请编辑 `model_prices.json`**。
 - 汇率：实时获取（`open.er-api.com`），失败回退 7.2，缓存 1 小时（`~/.claude/usd_cny.json`）。
 
