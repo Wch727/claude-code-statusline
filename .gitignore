@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 .workbuddy/
+.runtime/
+.models-dev-inspect.json
+.upstream-cc-switch/
+.playwright-mcp/

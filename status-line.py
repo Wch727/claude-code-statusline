@@ -4,7 +4,14 @@
 import json
 import sys
 import os
+import re as _re2
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+import statusline_store as usage_store
+from ccswitch_compat import (prefer_usage_snapshot, record_chain_node,
+                             record_block_timing, estimated_timing)
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -33,16 +40,124 @@ def bar(pct, width=14):
     return "█" * filled + "░" * (width - filled)
 
 # ── 价格库 / 汇率 ─────────────────────────────────────
-PRICE_DB = os.path.expanduser("~/.claude/model_prices.json")
-USD_CNY_CACHE = os.path.expanduser("~/.claude/usd_cny.json")
-USD_CNY_TTL = 1800  # 汇率缓存 30 分钟（新浪实时源，日内可见变动）
+def data_path(name):
+    root = os.environ.get('STATUSLINE_HOME')
+    return os.path.join(root, name) if root else os.path.expanduser('~/.claude/' + name)
 
-def load_prices():
+
+PRICE_DB = data_path('model_prices.json')
+USD_CNY_CACHE = data_path('usd_cny.json')
+USD_CNY_TTL = 1800  # 汇率缓存 30 分钟（新浪实时源，日内可见变动）
+FX_STATUS = "暂用值，后台刷新"
+
+
+def _valid_fx(value):
+    rate = float(value)
+    if not 4.0 < rate < 10.0:
+        raise ValueError("invalid USD/CNY rate")
+    return rate
+
+def _base_prices():
     try:
         with open(PRICE_DB, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def load_prices():
+    base = _base_prices()
+    snapshot = usage_store.read_json(Path(PRICE_DB).with_name('prices_online.json'))
+    try:
+        return usage_store.merge_online_prices(base, snapshot, price_key)
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return base
+
+
+def maybe_sync_prices(prices):
+    """Spawn at most one updater; rendering never waits for the network."""
+    import time
+    import subprocess
+    if os.environ.get('STATUSLINE_DISABLE_PRICE_SYNC') == '1':
+        return
+    config = prices.get('_sync', {})
+    if not config.get('autoSyncEnabled', False):
+        return
+    root = Path(PRICE_DB).parent
+    status = usage_store.read_json(root / 'price_sync_status.json')
+    interval = max(3600, float(config.get('intervalHours', 6)) * 3600)
+    if time.time() - status.get('last_success', 0) < interval:
+        return
+    if time.time() - status.get('last_attempt', 0) < 300:
+        return
+    lock = root / 'price_sync_start.lock'
+    try:
+        if lock.exists() and time.time() - lock.stat().st_mtime > 300:
+            lock.unlink()
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except OSError:
+        return
+    try:
+        options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), '--sync-prices'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options)
+    except OSError:
+        pass
+
+
+def _normalized_model_name(value):
+    import unicodedata
+    text = unicodedata.normalize("NFKC", value).casefold().strip()
+    text = text.replace("–", "-").replace("—", "-")
+    text = _re2.sub(r"[\s_.]+", "-", text)
+    text = _re2.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", "-", text)
+    return _re2.sub(r"-+", "-", text).strip("-")
+
+
+def price_key(model, prices):
+    """One resolver for every provider; semantic aliases live in the price DB.
+
+    Exact IDs win. Formatting/date variants must resolve uniquely; a family
+    prefix alone never selects a version, tier or provider.
+    """
+    key = _re2.sub(r"\[\w+\]", "", str(model or "")).strip()
+    if not key.startswith("_") and isinstance(prices.get(key), dict):
+        return key
+    key = key.rsplit("/", 1)[-1].strip()
+    if not key.startswith("_") and isinstance(prices.get(key), dict):
+        return key
+    clean = key.split(":", 1)[0].replace("@", "-")
+    # Bedrock regional/global wrappers are transport IDs, not model versions.
+    wrapped = _re2.sub(r"^(?:(?:global|us|eu|apac)\.)?anthropic\.", "", clean, flags=_re2.I)
+    if wrapped != clean:
+        wrapped = _re2.sub(r"-v\d+$", "", wrapped)
+    undated = lambda value: _re2.sub(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$", "", value)
+    index = {}
+    for name, entry in prices.items():
+        if name.startswith("_") or not isinstance(entry, dict):
+            continue
+        aliases = entry.get("aliases", [])
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not isinstance(aliases, (list, tuple)):
+            aliases = []
+        for alias in [name, *aliases]:
+            if isinstance(alias, str):
+                index.setdefault(_normalized_model_name(alias), set()).add(name)
+    for variant in (key, clean, wrapped, undated(wrapped)):
+        matches = index.get(_normalized_model_name(variant), set())
+        if matches:
+            return next(iter(matches)) if len(matches) == 1 else key
+    # A short ID may identify a single dated entry, but multiple versions with
+    # different prices must remain ambiguous instead of silently picking one.
+    short = _normalized_model_name(undated(wrapped))
+    matches = {name for name, entry in prices.items() if not name.startswith("_")
+               and isinstance(entry, dict) and _normalized_model_name(undated(name)) == short}
+    if len(matches) == 1:
+        return next(iter(matches))
+    return key
 
 def _fetch_sina_fx():
     """新浪财经外汇实时价（在岸美元人民币），失败抛异常。
@@ -68,37 +183,66 @@ def _fetch_er_api():
     with urllib.request.urlopen("https://open.er-api.com/v6/latest/USD", timeout=5) as r:
         return float(json.loads(r.read().decode())["rates"]["CNY"])
 
-def get_usd_cny():
+def get_usd_cny(refresh=False):
     """实时 USD→CNY 汇率（缓存 30 分钟）。
 
-    数据源按可靠性依次回退：新浪实时 → ExchangeRate-API（日更）→ 本地缓存 → 7.2。
+    前台立即使用缓存或 7.2，过期后启动后台刷新。
+    后台数据源：新浪实时 → ExchangeRate-API（日更）→ 本地缓存 → 7.2。
     注意：在岸人民币周末/夜间休市，此时汇率本就几乎不动，并非未刷新。
     """
     import time as _t
+    global FX_STATUS
+    FX_STATUS = "暂用值，后台刷新"
+    cached_rate = 7.2
     try:
         if os.path.exists(USD_CNY_CACHE):
             with open(USD_CNY_CACHE, encoding="utf-8") as f:
                 c = json.load(f)
-            if _t.time() - c.get("ts", 0) < USD_CNY_TTL and c.get("rate"):
-                return c["rate"]
+            cached_rate = _valid_fx(c.get("rate"))
+            FX_STATUS = "过期缓存，后台刷新"
+            if 0 <= _t.time() - float(c.get("ts", 0)) < USD_CNY_TTL:
+                FX_STATUS = "缓存"
+                return cached_rate
     except Exception:
         pass
+    if not refresh:
+        # The short-lived renderer never waits for network I/O. A lock limits
+        # background refreshes (and retries after failure) to one per minute.
+        import subprocess
+        lock = USD_CNY_CACHE + ".lock"
+        try:
+            if os.path.exists(lock) and _t.time() - os.path.getmtime(lock) > 60:
+                os.unlink(lock)
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except OSError:
+            return cached_rate
+        try:
+            options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
+            subprocess.Popen([sys.executable, os.path.abspath(__file__), "--refresh-fx"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, **options)
+        except OSError:
+            pass
+        return cached_rate
     rate = None
     for _fetch in (_fetch_sina_fx, _fetch_er_api):
         try:
-            rate = _fetch()
+            rate = _valid_fx(_fetch())
+            FX_STATUS = "新浪" if _fetch is _fetch_sina_fx else "ExchangeRate-API（日更）"
             break
         except Exception:
             continue
     if rate is None:                     # 全部失败：回退到旧缓存，最后 7.2
         try:
             with open(USD_CNY_CACHE, encoding="utf-8") as f:
-                return json.load(f).get("rate", 7.2)
+                return _valid_fx(json.load(f).get("rate"))
         except Exception:
             return 7.2
     try:
-        with open(USD_CNY_CACHE, "w", encoding="utf-8") as f:
+        with open(USD_CNY_CACHE + ".tmp", "w", encoding="utf-8") as f:
             json.dump({"ts": _t.time(), "rate": rate}, f)
+        os.replace(USD_CNY_CACHE + ".tmp", USD_CNY_CACHE)
     except Exception:
         pass
     return rate
@@ -107,8 +251,9 @@ def fmt_price(x):
     return f"{x:.5f}".rstrip("0").rstrip(".")
 
 # ── 累计用量（增量读 transcript，避免每秒全量解析）────────
-USAGE_CACHE = os.path.expanduser("~/.claude/usage_cache.json")
-CACHE_VERSION = 7  # 缓存格式版本：结构变化时 +1，旧缓存自动作废重算（7：峰谷规则加入法定节假日）
+USAGE_CACHE = data_path('usage_cache.json')
+LEDGER_ERROR = None
+CACHE_VERSION = 8  # 文件身份、字节偏移和读取位置校验；旧缓存自动重算
 BUCKETS = ("legacy", "peak", "offpeak")
 _CN_TZ = timezone(timedelta(hours=8))
 _PEAK_START = datetime(2026, 8, 17, 0, 0, 0, tzinfo=_CN_TZ)  # 峰谷定价生效时刻（北京）
@@ -134,13 +279,28 @@ def _cn_holidays_2026():
 
 _CN_HOLIDAYS = _cn_holidays_2026()
 
+
+def holiday_calendar(prices=None):
+    """Optional _holidays year -> ISO dates; never assume a missing year is empty."""
+    from datetime import date
+    calendar = {2026: _CN_HOLIDAYS}
+    for year, values in (prices or {}).get("_holidays", {}).items():
+        try:
+            year = int(year)
+            dates = frozenset(date.fromisoformat(value) for value in values)
+            if dates and all(day.year == year for day in dates):
+                calendar[year] = dates
+        except (TypeError, ValueError):
+            continue
+    return calendar
+
 # 百炼平台模型：峰谷时段与 DeepSeek 官方不同（百炼空闲 22:00–8:00，其余高峰）
 _BAILIAN_MODELS = {"deepseek-v4-flash-0731"}
 
 def _zero_usage():
-    return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+    return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0}
 
-def classify_bucket(ts, model=None):
+def classify_bucket(ts, model=None, calendar=None):
     """按消息时间戳 + 模型返回 legacy / peak / offpeak。
 
     - < 2026-08-17 00:00（北京）：legacy（旧固定单价）
@@ -166,10 +326,14 @@ def classify_bucket(ts, model=None):
             return "peak"
         return "offpeak"
     # 周末（周六=5/周日=6）与法定节假日自 8-23 起全天低谷
-    if bj >= _WEEKEND_START and (bj.weekday() >= 5 or bj.date() in _CN_HOLIDAYS):
+    if calendar is None:
+        calendar = holiday_calendar()
+    if bj >= _WEEKEND_START and (bj.weekday() >= 5 or bj.date() in calendar.get(bj.year, ())):
         return "offpeak"
     # DeepSeek 官方：仅工作日高峰 9:00–12:00、14:00–18:00
     if (9 <= bj.hour < 12) or (14 <= bj.hour < 18):
+        if bj >= _WEEKEND_START and bj.year not in calendar:
+            return f"calendar-unknown-{bj.year}"
         return "peak"
     return "offpeak"
 
@@ -180,18 +344,91 @@ def classify_segment(ts, model, input_tokens, prices):
     - 长上下文模型（价格表含 long_threshold）：单条消息输入 token 超过阈值 → long，否则 short
     - 扁平模型：flat（无分档）
     """
-    key = (model or "").split("[")[0]
+    key = price_key(model, prices or {})
     entry = (prices or {}).get(key) or (prices or {}).get(model)
+    if isinstance(entry, dict) and entry.get("revisions") and ts:
+        try:
+            when = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            for index in range(len(entry["revisions"]) - 1, -1, -1):
+                revision = entry["revisions"][index]
+                since = datetime.fromisoformat(revision["from"].replace("Z", "+00:00"))
+                if when >= since:
+                    segment = classify_segment(ts, model, input_tokens, {**(prices or {}), key: revision["prices"]})
+                    return f"revision-{index}:{segment}"
+        except (ValueError, TypeError, KeyError):
+            pass
     if isinstance(entry, dict) and any(b in entry for b in BUCKETS):
-        return classify_bucket(ts, model)
+        return classify_bucket(ts, model, holiday_calendar(prices))
     if isinstance(entry, dict) and "long" in entry:
         return "long" if (input_tokens or 0) > entry.get("long_threshold", 0) else "short"
     return "flat"
 
-def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_duration_ms=0):
+@contextmanager
+def _cache_lock(path):
+    """OS locks are released even when a renderer is killed; no stale lock deletion."""
+    with open(path, "a+b") as lock:
+        lock.seek(0, os.SEEK_END)
+        if not lock.tell():
+            lock.write(b"\0")
+            lock.flush()
+        lock.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            # LK_LOCK retries in one-second intervals. Poll briefly instead so
+            # normal concurrent refreshes do not add a whole second of latency.
+            import time
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _with_usage_lock(func):
+    @wraps(func)
+    def locked(*args, **kwargs):
+        with _cache_lock(USAGE_CACHE + ".lock"):
+            return func(*args, **kwargs)
+    return locked
+
+
+def _atomic_json(path, value):
+    import tempfile
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False,
+                                         dir=os.path.dirname(os.path.abspath(path))) as f:
+            tmp = f.name
+            json.dump(value, f)
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+@_with_usage_lock
+def get_cumulative_usage(transcript_path, prices=None, duration_ms=None, api_duration_ms=None):
     """增量累计每模型的 token 用量（按会话隔离 + 按计费分段，只处理新增行）。
 
-    缓存结构：``{ "_version": 5, transcript_path: {"offset": int, "usage": {model: {segment: {…}}}} }``。
+    缓存结构：``{ "_version": 8, transcript_path: {"offset": int, "usage": {model: {segment: {…}}}, …} }``。
     segment ∈ {legacy,peak,offpeak}（峰谷）或 {short,long}（长上下文）或 {flat}（扁平），
     每个 segment 记录 input/output/cache_read/cache_write。
     旧格式缓存通过 ``_version`` 判定后自动作废重算。
@@ -219,6 +456,26 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
     if cache.get("_version") != CACHE_VERSION:
         cache = {"_version": CACHE_VERSION}
     session = cache.setdefault(transcript_path, {"offset": 0, "usage": {}})
+    # Reset transcript-derived data after replacement, truncation or a rewrite
+    # around the saved offset. Keep resume duration bookkeeping independent.
+    import hashlib
+    pricing_signature = hashlib.sha256(json.dumps(prices, sort_keys=True).encode()).hexdigest()
+    try:
+        stat = os.stat(transcript_path)
+        identity = [stat.st_dev, stat.st_ino]
+        offset = int(session.get("offset", 0))
+        with open(transcript_path, "rb") as probe:
+            probe.seek(max(0, offset - 256))
+            tail = hashlib.sha256(probe.read(min(offset, 256))).hexdigest()
+        if (session.get("identity") != identity or session.get("pricing_signature") != pricing_signature
+                or stat.st_size < offset
+                or session.get("tail") != tail or session.get("usage_version") != 4):
+            session.update(offset=0, usage={}, messages={}, chain={}, timings={}, usage_version=4)
+            session.pop("custom_title", None)
+        session["identity"] = identity
+        session["pricing_signature"] = pricing_signature
+    except OSError:
+        pass
     usage = session["usage"]
     if not isinstance(usage, dict):
         usage = session["usage"] = {}
@@ -233,12 +490,21 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
         session[base_key] = base
         session[last_key] = cur
         return base + cur
-    total_duration = _acc("duration", duration_ms or 0)
-    total_api = _acc("api", api_duration_ms or 0)
+    total_duration = (_acc("duration", duration_ms) if duration_ms is not None
+                      else session.get('dur_base', 0) + session.get('dur_last', 0))
+    total_api = (_acc("api", api_duration_ms) if api_duration_ms is not None
+                 else session.get('api_base', 0) + session.get('api_last', 0))
     try:
-        with open(transcript_path, "r", encoding="utf-8") as f:
+        with open(transcript_path, "rb") as f:
             f.seek(int(session.get("offset", 0)))
-            for line in f:
+            while True:
+                start = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                if not line.endswith(b"\n"):
+                    f.seek(start)  # Writer has not finished this JSONL record.
+                    break
                 line = line.strip()
                 if not line:
                     continue
@@ -246,6 +512,11 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
                     rec = json.loads(line)
                 except Exception:
                     continue
+                if not isinstance(rec, dict):
+                    continue
+                chain = session.setdefault('chain', {})
+                timings = session.setdefault('timings', {})
+                record_chain_node(chain, rec)
                 if rec.get("type") == "custom-title":
                     # 仅认手动命名（/rename、--name）；ai-title 是自动生成的，忽略
                     _ct = rec.get("customTitle")
@@ -254,31 +525,108 @@ def get_cumulative_usage(transcript_path, prices=None, duration_ms=0, api_durati
                     continue
                 if rec.get("type") == "assistant":
                     m = rec.get("message") or {}
+                    if not isinstance(m, dict):
+                        continue
                     u = m.get("usage") or {}
-                    model = str(m.get("model") or "unknown")
-                    input_tokens = int(u.get("input_tokens", 0) or 0)
-                    seg = classify_segment(rec.get("timestamp"), model, input_tokens, prices)
+                    if not isinstance(u, dict) or not u:
+                        continue
+                    model = price_key(m.get("model") or "unknown", prices)
+                    try:
+                        tokens = {field: max(0, int(u.get(native, 0) or 0)) for field, native in (
+                            ("input", "input_tokens"), ("output", "output_tokens"),
+                            ("cache_read", "cache_read_input_tokens"), ("cache_write", "cache_creation_input_tokens"))}
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    creation = u.get("cache_creation") or {}
+                    try:
+                        tokens["cache_write_1h"] = min(tokens["cache_write"], max(0, int(
+                            creation.get("ephemeral_1h_input_tokens", 0) or 0))) if isinstance(creation, dict) else 0
+                    except (TypeError, ValueError, OverflowError):
+                        tokens["cache_write_1h"] = 0
+                    if not any(tokens.values()):
+                        continue  # Synthetic/non-billable assistant records.
+                    # Claude Code saves each content block separately, repeating
+                    # the message-level usage. Keep one snapshot per API message.
+                    identifier = m.get("id") or rec.get("requestId") or rec.get("uuid") or f'offset:{start}'
+                    messages = session.setdefault("messages", {})
+                    msg_key = json.dumps([model, identifier])
+                    previous = messages.get(msg_key)
+                    record_block_timing(timings, rec, str(identifier))
+                    if not prefer_usage_snapshot(previous, tokens, m.get('stop_reason')):
+                        continue
+                    timing = estimated_timing(chain, timings.get(str(identifier)), m.get('stop_reason') is not None)
+                    timestamp = (datetime.fromtimestamp(timing['start_ms'] / 1000, timezone.utc).isoformat()
+                                 if timing else previous.get('timestamp') if previous else rec.get('timestamp'))
+                    prompt_tokens = tokens["input"] + tokens["cache_read"] + tokens["cache_write"]
+                    seg = classify_segment(timestamp, model, prompt_tokens, prices)
                     e = usage.get(model)
                     if not isinstance(e, dict):
                         e = usage[model] = {}
+                    if previous:
+                        old = e.get(previous["segment"], {})
+                        for field, value in previous["tokens"].items():
+                            old[field] = old.get(field, 0) - value
                     b = e.setdefault(seg, _zero_usage())
-                    b["input"] += input_tokens
-                    b["output"] += int(u.get("output_tokens", 0) or 0)
-                    b["cache_read"] += int(u.get("cache_read_input_tokens", 0) or 0)
-                    b["cache_write"] += int(u.get("cache_creation_input_tokens", 0) or 0)
+                    for field, value in tokens.items():
+                        b[field] = b.get(field, 0) + value
+                    messages[msg_key] = {"timestamp": timestamp, "segment": seg, "tokens": tokens,
+                                         'request_key': str(identifier), 'raw_model': m.get('model'),
+                                         'model': model, 'stop_reason': m.get('stop_reason'),
+                                         'response_timestamp': rec.get('timestamp'),
+                                         'timestamp_source': '请求起点估算（父链）' if timing else '回复记录时间（请求起点未知）'}
             session["offset"] = f.tell()
+            f.seek(max(0, session["offset"] - 256))
+            session["tail"] = hashlib.sha256(f.read(min(session["offset"], 256))).hexdigest()
     except Exception:
         pass
+    record_session_ledger(transcript_path, session, prices)
     # 精简：只保留文件仍存在的会话，避免缓存无限增长。
     for p in list(cache.keys()):
         if p != "_version" and not os.path.exists(p):
             cache.pop(p, None)
     try:
-        with open(USAGE_CACHE, "w", encoding="utf-8") as f:
-            json.dump(cache, f)
+        _atomic_json(USAGE_CACHE, cache)
     except Exception:
         pass
     return usage, total_duration, total_api, session.get("custom_title")
+
+
+def ledger_db():
+    return Path(USAGE_CACHE).with_name('usage_ledger.sqlite3')
+
+
+def session_key(path):
+    import hashlib
+    return hashlib.sha256(os.path.abspath(path).encode('utf-8')).hexdigest()[:24]
+
+
+def record_session_ledger(path, session, prices):
+    global LEDGER_ERROR
+    rows = []
+    for message in session.get('messages', {}).values():
+        model, seg, tokens = message['model'], message['segment'], message['tokens']
+        entry = prices.get(price_key(model, prices), {})
+        rates = dict(_segment_rate(entry, seg))
+        if entry.get('provider') == 'anthropic' and rates:
+            rates['cache_write_1h'] = rates.get('cache_write_1h', rates.get('input', 0) * 2)
+        _, _, details = cumulative_cost({model: {seg: tokens}}, prices)
+        detail = details.get(model, {})
+        reason = detail.get('unpriced_reason') or ('价格未配置' if not rates else '')
+        timing = estimated_timing(session.get('chain', {}), session.get('timings', {}).get(message['request_key']),
+                                  message.get('stop_reason') is not None)
+        rows.append({'session_key': session_key(path), 'request_key': message['request_key'],
+                     'timestamp': message['timestamp'], 'response_timestamp': message.get('response_timestamp'),
+                     'timestamp_source': message.get('timestamp_source'),
+                     'model': model, 'raw_model': message.get('raw_model'), 'segment': seg,
+                     'currency': entry.get('currency', 'USD'), 'tokens': tokens, 'rates': rates,
+                     'price_entry': entry, 'cost': detail.get('cost') if rates else None,
+                     'unpriced_reason': reason, 'source': entry.get('source', '本地价格规则'),
+                     'latency_ms': timing.get('latency_ms'), 'first_token_ms': timing.get('first_token_ms')})
+    try:
+        usage_store.record_requests(ledger_db(), rows)
+        LEDGER_ERROR = None
+    except Exception as exc:
+        LEDGER_ERROR = f'{type(exc).__name__}: {exc}'
 
 def _segment_rate(entry, seg):
     """返回指定分段的单价子表。
@@ -289,6 +637,12 @@ def _segment_rate(entry, seg):
     """
     if not isinstance(entry, dict):
         return {}
+    if seg.startswith("revision-"):
+        revision, subsegment = seg.split(":", 1)
+        try:
+            return _segment_rate(entry["revisions"][int(revision.split("-")[1])]["prices"], subsegment)
+        except (KeyError, IndexError, ValueError):
+            return {}
     if any(b in entry for b in BUCKETS):
         return entry.get(seg) or {}
     if seg == "long" and "long" in entry:
@@ -310,6 +664,7 @@ def cumulative_cost(usage, prices):
     - ``currency == "CNY"`` 的模型（deepseek 等 .cn 国产模型）价格按人民币
       原生计费，直接显示 ¥，不做美元换算；
     - 其余模型按 USD 计费，显示时再乘实时汇率换算 ¥。
+    - 缺少价格的模型保留用量，cost 为 None，不计入已知费用小计。
 
     ``detail[model]`` 含分项金额 ``cost_in/cost_out/cost_cr/cost_cw``
     （均以该模型本币为单位）供花费明细行使用。峰谷模型按 legacy/peak/offpeak
@@ -319,9 +674,14 @@ def cumulative_cost(usage, prices):
     total_cny = 0.0
     detail = {}
     for model, u in usage.items():
-        key = _re2.sub(r"\[\w+\]", "", model) if model else ""
+        key = price_key(model, prices)
         e = prices.get(key) or prices.get(model)
         if not e:
+            detail[model] = {
+                field: _usage_total(u, field)
+                for field in ("input", "output", "cache_read", "cache_write")
+            }
+            detail[model]["cost"] = None
             continue
         currency = str(e.get("currency", "USD") or "USD").upper()
         if not isinstance(u, dict):
@@ -330,20 +690,31 @@ def cumulative_cost(usage, prices):
             u = {"flat": u}  # 兼容旧扁平 usage
         in_c = out_c = cr_c = cw_c = 0.0
         tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        unpriced = []
         for seg, ub in u.items():
             if not isinstance(ub, dict):
                 continue
+            for field in tok:
+                tok[field] += ub.get(field, 0)
             rate = _segment_rate(e, seg)
             if not rate:
+                if "calendar-unknown-" in seg:
+                    unpriced.append(f"{seg.rsplit('-', 1)[-1]} 节假日表缺失，部分用量未计费")
+                else:
+                    unpriced.append("部分计费分段价格未知，未计费")
                 continue
             i = ub.get("input", 0); o = ub.get("output", 0)
             cr = ub.get("cache_read", 0); cw = ub.get("cache_write", 0)
             in_c += i / 1e6 * rate.get("input", 0)
             out_c += o / 1e6 * rate.get("output", 0)
             cr_c += cr / 1e6 * rate.get("cache_read", 0)
-            cw_c += cw / 1e6 * rate.get("cache_write", rate.get("input", 0))
-            tok["input"] += i; tok["output"] += o
-            tok["cache_read"] += cr; tok["cache_write"] += cw
+            cw_rate = rate.get("cache_write", rate.get("input", 0))
+            if e.get("provider") == "anthropic":
+                one_hour = min(cw, ub.get("cache_write_1h", 0))
+                hour_rate = rate.get("cache_write_1h", rate.get("input", 0) * 2)
+                cw_c += ((cw - one_hour) * cw_rate + one_hour * hour_rate) / 1e6
+            else:
+                cw_c += cw / 1e6 * cw_rate
         c = in_c + out_c + cr_c + cw_c
         if currency == "CNY":
             total_cny += c
@@ -354,14 +725,77 @@ def cumulative_cost(usage, prices):
             "cache_read": tok["cache_read"], "cache_write": tok["cache_write"],
             "cost": c, "currency": currency,
             "cost_in": in_c, "cost_out": out_c, "cost_cr": cr_c, "cost_cw": cw_c,
+            "unpriced_reason": "; ".join(sorted(set(unpriced))),
         }
     return total_usd, total_cny, detail
+
+def sync_price_command():
+    root = Path(PRICE_DB).parent
+    root.mkdir(parents=True, exist_ok=True)
+    with _cache_lock(str(root / 'price_sync.lock')):
+        return usage_store.sync_prices(_base_prices(), price_key, root / 'prices_online.json')
+
+
+def import_usage(days=1):
+    import time
+    projects = Path(PRICE_DB).parent / 'projects'
+    prices = load_prices()
+    files = 0
+    errors = []
+    for path in projects.rglob('*.jsonl'):
+        try:
+            if path.stat().st_mtime < time.time() - days * 86400:
+                continue
+            get_cumulative_usage(str(path), prices)
+            if LEDGER_ERROR:
+                errors.append(LEDGER_ERROR)
+            files += 1
+        except (OSError, ValueError) as exc:
+            errors.append(f'{type(exc).__name__}: {exc}')
+    return {'files': files, 'errors': errors}
+
+
+if len(sys.argv) > 1 and sys.argv[1] in ('--sync-prices', '--price-status', '--usage-import', '--usage-report', '--usage-web', '--help', '-h'):
+    import argparse
+    parser = argparse.ArgumentParser(description='Statusline price sync and per-request usage log')
+    parser.add_argument('command', nargs='?')
+    for flag in ('sync-prices', 'price-status', 'usage-import', 'usage-report', 'usage-web'):
+        parser.add_argument('--' + flag, action='store_true')
+    parser.add_argument('--days', type=float, default=1)
+    parser.add_argument('--port', type=int, default=0)
+    parser.add_argument('--output')
+    args = parser.parse_args()
+    root = Path(PRICE_DB).parent
+    try:
+        if args.sync_prices:
+            print(json.dumps(sync_price_command(), ensure_ascii=False))
+        elif args.price_status:
+            print(json.dumps(usage_store.read_json(root / 'price_sync_status.json'), ensure_ascii=False, indent=2))
+        elif args.usage_import:
+            print(json.dumps(import_usage(args.days), ensure_ascii=False))
+        elif args.usage_report:
+            report = Path(args.output) if args.output else root / 'usage-report.html'
+            report.write_text(usage_store.report_html(usage_store.read_requests(ledger_db()),
+                              usage_store.read_json(root / 'price_sync_status.json')), encoding='utf-8')
+            print(str(report.resolve()))
+        elif args.usage_web:
+            print(json.dumps(import_usage(args.days), ensure_ascii=False), flush=True)
+            usage_store.serve_report(ledger_db(), root / 'price_sync_status.json', sync_price_command, args.port)
+    except Exception as exc:
+        print(f'{type(exc).__name__}: {exc}', file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0)
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "--refresh-fx":
+    get_usd_cny(refresh=True)
+    sys.exit(0)
 
 # 查单价：python ~/.claude/status-line.py --prices
 if len(sys.argv) > 1 and sys.argv[1] == "--prices":
     prices = load_prices()
     rate = get_usd_cny()
-    print(f"Rate: 1 USD = {rate:.4f} CNY (live, 1h cache)\n")
+    print(f"Rate: 1 USD = {rate:.4f} CNY ({FX_STATUS}; 30min cache; refresh in background)\n")
     names = [n for n in prices if not n.startswith("_")]
     mw = max([len(n) for n in names] + [len("model")])
     print(f"{'model':<{mw}} {'provider':<10} {'cur':>4} {'in':>9} {'out':>9} {'cache-read':>11}")
@@ -369,6 +803,10 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
     for name, p in prices.items():
         if name.startswith("_"):
             continue
+        if p.get("revisions"):
+            revision = p["revisions"][-1]
+            print(f"{name}: current since {revision['from']} (historical rates retained)")
+            p = {**p, **revision["prices"]}
         currency = str(p.get("currency", "USD") or "USD").upper()
         unit = "¥" if currency == "CNY" else "$"
         if any(b in p for b in BUCKETS):
@@ -399,12 +837,16 @@ if len(sys.argv) > 1 and sys.argv[1] == "--prices":
 # ── 解析 ──────────────────────────────────────────────
 try:
     data = json.load(sys.stdin)
+    if not isinstance(data, dict):
+        raise TypeError("status input must be an object")
 except (json.JSONDecodeError, TypeError):
     print("Status line: invalid input")
     sys.exit(0)
 
 # ── 字段 ──────────────────────────────────────────────
-model = data.get("model", {})
+model = data.get("model") or {}
+if not isinstance(model, (str, dict)):
+    model = {}
 # 兼容两种格式：dict（{id, display_name}）或纯字符串（视觉模型等别名模型）。
 if isinstance(model, str):
     model_id = model
@@ -414,7 +856,6 @@ else:
     model_name = model.get("display_name") or model_id
 if isinstance(model_name, str) and "/" in model_name:
     model_name = model_name.split("/")[-1]
-import re as _re2
 model_name = _re2.sub(r"\[\w+\]", "", model_name)  # 去掉 [1M]/[1m] 后缀
 provider = model.get("provider") or model.get("vendor") or model.get("supplier") or "?" if isinstance(model, dict) else "?"
 
@@ -428,6 +869,8 @@ cache_read  = cu.get("cache_read_input_tokens")                        # 缓存�
 ctx_size  = ctx.get("context_window_size") or ctx.get("total_tokens") or ctx.get("max_tokens") or 0
 used_pct     = ctx.get("used_percentage")
 remaining_pct = ctx.get("remaining_percentage")
+if remaining_pct is None and isinstance(used_pct, (int, float)):
+    remaining_pct = max(0, min(100, 100 - used_pct))
 
 # 会话时长 / 花费 / 消息数
 cost_obj = data.get("cost") or {}
@@ -438,8 +881,10 @@ msg_count = data.get("message_count")
 # 花费：按价格库 × transcript 累计用量（跨模型）。
 # transcript 不可读时才退回 Claude Code 的 total_cost_usd。
 _prices = load_prices()
-_lookup_key = _re2.sub(r"\[\w+\]", "", model_name or "")
+_lookup_key = price_key(model_id, _prices)
 _entry = _prices.get(_lookup_key) or _prices.get(model_name)
+if provider in ("?", "") and _entry:
+    provider = _entry.get("provider") or "?"
 _transcript = data.get("transcript_path")
 _cum_usage = {}
 _cum_usd = None
@@ -450,9 +895,15 @@ if _transcript and os.path.exists(_transcript):
     _cum_usage, duration, api_duration, _custom_title = get_cumulative_usage(
         _transcript, _prices, duration, api_duration)
     _cum_usd, _cum_cny, _cum_detail = cumulative_cost(_cum_usage, _prices)
+    if not LEDGER_ERROR:
+        _logged = usage_store.session_costs(ledger_db(), session_key(_transcript))
+        if _logged:
+            _cum_usd, _cum_cny, _cum_detail = _logged
+_unknown_prices = any(d.get("cost") is None or d.get("unpriced_reason") for d in _cum_detail.values())
 # transcript 不可读时退回 Claude Code 的 total_cost_usd（仅当有 USD 模型）。
 _cost_usd_total = _cum_usd if _cum_usd is not None else float(cost_obj.get("total_cost_usd") or 0) or None
 _rate = get_usd_cny()  # 共享汇率，供各行 ¥ 换算
+maybe_sync_prices(_prices)
 
 # 当前目录
 cwd = data.get("cwd") or (data.get("workspace") or {}).get("current_dir") or ""
@@ -490,7 +941,7 @@ PROVIDER_COLOR = {
     "stepfun":  "\033[1;35m",   # 亮紫（阶跃 Step）
 }
 def provider_color(model):
-    prov = (_prices.get(model) or {}).get("provider", "")
+    prov = (_prices.get(price_key(model, _prices)) or {}).get("provider", "")
     return PROVIDER_COLOR.get(prov, CYAN)
 
 # ── 拼接 ──────────────────────────────────────────────
@@ -580,16 +1031,26 @@ parts2 = []
 # CNY 原生模型（deepseek 等 .cn）直接显示 ¥；USD 模型显示 $（并换算 ¥）。
 if _cum_usd is not None or _cum_cny or _cost_usd_total is not None:
     _cost_label = _model_tag if len(_cum_detail) <= 1 else "total"
+    if _unknown_prices:
+        _cost_label += " (known prices only / 仅已知部分)"
     _cost_pieces = []
     if _cum_usd:
         _cost_pieces.append(f"{GREEN}${_cum_usd:.3f}{NC} ({MAGENTA}¥{_cum_usd * _rate:.2f}{NC})")
     if _cum_cny:
         _cost_pieces.append(f"{MAGENTA}¥{_cum_cny:.3f}{NC}")
+    if not _cost_pieces and _cum_detail:
+        currencies = {d.get("currency") for d in _cum_detail.values() if d.get("cost") is not None}
+        if currencies == {"CNY"}:
+            _cost_pieces.append(f"{MAGENTA}¥0.000{NC}")
+        elif not currencies:
+            _cost_pieces.append("暂无已知价格")
     if not _cost_pieces and _cost_usd_total is not None:
         _cost_pieces.append(f"{GREEN}${_cost_usd_total:.3f}{NC} ({MAGENTA}¥{_cost_usd_total * _rate:.2f}{NC})")
     if _cost_pieces:
         parts2.append(f"💰 {_cost_label} {' + '.join(_cost_pieces)}")
-parts2.append(f"💱 1$={CYAN}{_rate:.2f}{NC}¥")
+parts2.append(f"💱 1$={CYAN}{_rate:.2f}{NC}¥ ({FX_STATUS})")
+if LEDGER_ERROR:
+    parts2.append('⚠ 请求日志写入失败')
 
 # 消息数
 if msg_count is not None:
@@ -670,13 +1131,18 @@ if _gen_time > 0 and _tot_out > 0:
 # 第四行起：每个模型两行——一行 token，一行花费
 parts3 = []
 if _cum_detail:
-    for model, d in sorted(_cum_detail.items(), key=lambda kv: -kv[1]["cost"]):
+    for model, d in sorted(_cum_detail.items(), key=lambda kv: -(kv[1]["cost"] or 0)):
         tok_line = f"{provider_color(model)}{model}{NC} · {dim('in')} {fmt(d['input'])}  {dim('out')} {fmt(d['output'])}"
         if d["cache_read"]:
             tok_line += f"  {dim('cache read')} {fmt(d['cache_read'])}"
         if d["cache_write"]:
             tok_line += f"  {dim('cache write')} {fmt(d['cache_write'])}"
         parts3.append(tok_line)
+        if d.get("cost") is None:
+            parts3.append(f"    {dim('价格未配置，未计入费用')}")
+            continue
+        if d.get("unpriced_reason"):
+            parts3.append(f"    {YELLOW}{d['unpriced_reason']}{NC}")
         # 花费明细：金额单独一行，避免与 token 挤在一起。
         # 本币显示：CNY 模型只给 ¥；USD 模型给 $ + 换算 ¥。
         currency = d.get("currency", "USD")
